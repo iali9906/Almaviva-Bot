@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+almaviva_config.json
+token_cache.json
+.env
+.DS_Store
+venv/

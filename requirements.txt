@@ -1,0 +1,5 @@
+customtkinter>=5.2.2
+requests>=2.31.0
+undetected-chromedriver>=3.5.4
+selenium>=4.15.0
+python-telegram-bot>=20.0
