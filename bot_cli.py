@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Almaviva Bot - CLI Interface
-Monitoraggio appuntamenti da riga di comando con login diretto API.
+Monitoraggio appuntamenti da riga di comando.
+Legge le credenziali dal file almaviva_config.json
 """
 import requests
 import time
@@ -10,10 +11,48 @@ import os
 from datetime import datetime, timedelta
 from constants import AUTH_TOKEN_URL, CLIENT_ID, CHECKS_URL, FREE_SLOTS_URL
 
+# ==================== CARICA CONFIGURAZIONE ====================
+CONFIG_FILE = "almaviva_config.json"
+
+def load_first_account():
+    """Carica il primo account dal file di configurazione JSON"""
+    if not os.path.exists(CONFIG_FILE):
+        print(f"❌ Errore: File {CONFIG_FILE} non trovato")
+        return None, None
+    
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            config = json.load(f)
+        
+        if not config.get("accounts") or len(config["accounts"]) == 0:
+            print("❌ Errore: Nessun account trovato nel file di configurazione")
+            return None, None
+        
+        account = config["accounts"][0]
+        email = account.get("email")
+        password = account.get("password")
+        
+        if not email or not password:
+            print("❌ Errore: Email o password mancanti per il primo account")
+            return None, None
+        
+        print(f"✅ Caricato account: {email}")
+        return email, password
+    
+    except json.JSONDecodeError:
+        print(f"❌ Errore: File {CONFIG_FILE} non è un JSON valido")
+        return None, None
+    except Exception as e:
+        print(f"❌ Errore durante il caricamento della configurazione: {e}")
+        return None, None
+
+# Carica le credenziali dal file
+EMAIL, PASSWORD = load_first_account()
+if not EMAIL or not PASSWORD:
+    print("Impossibile proseguire. Verifica che almaviva_config.json esista e contenga un account valido.")
+    exit(1)
+
 # ==================== CONFIGURAZIONE ====================
-# MODIFICA QUESTI VALORI CON LE TUE CREDENZIALI
-EMAIL = "tua_email@example.com"
-PASSWORD = "tua_password"
 VISA_ID = 8
 OFFICE_ID = 1
 SERVICE_LEVEL = 1
@@ -66,14 +105,6 @@ def check_availability(token):
             return "expired"
         if r.status_code == 429:
             return "rate_limit"
-        if r.status_code == 400:
-            try:
-                error_data = r.json()
-                if "check-can-create" in str(error_data):
-                    return "account_limit"
-            except:
-                pass
-            return False
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -95,23 +126,30 @@ def get_free_slots(token, date):
         print(f"Errore slots: {e}")
         return []
 
-def save_token(token_data):
-    with open("token_cache.json", "w") as f:
+def save_token_cache(token_data):
+    """Salva il token in cache per future sessioni"""
+    cache_file = "token_cache.json"
+    with open(cache_file, "w") as f:
         json.dump(token_data, f)
-    print("Token salvato in cache")
+    print(f"Token salvato in cache ({cache_file})")
 
-def load_cached_token():
-    if os.path.exists("token_cache.json"):
-        with open("token_cache.json", "r") as f:
-            data = json.load(f)
-        if data.get("expires_at", 0) > time.time() + 60:
-            print("Token valido trovato in cache")
-            return data
+def load_token_cache():
+    """Carica il token dalla cache se ancora valido"""
+    cache_file = "token_cache.json"
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r") as f:
+                data = json.load(f)
+            if data.get("expires_at", 0) > time.time() + 60:
+                print(f"Token valido trovato in cache (scade alle {datetime.fromtimestamp(data['expires_at']).strftime('%H:%M:%S')})")
+                return data
+        except:
+            pass
     return None
 
 def main():
     # Prova a caricare token da cache
-    cached = load_cached_token()
+    cached = load_token_cache()
     if cached:
         token = cached["access_token"]
         refresh = cached.get("refresh_token")
@@ -123,9 +161,14 @@ def main():
             print("Impossibile proseguire. Verifica le credenziali.")
             return
     
-    print(f"Inizio monitoraggio ogni {CHECK_INTERVAL_SEC} secondi...")
+    print(f"💰 Account: {EMAIL}")
+    print(f"🎯 Visto ID: {VISA_ID}")
+    print(f"🏢 Ufficio: {OFFICE_ID}")
+    print(f"🔄 Intervallo: {CHECK_INTERVAL_SEC} secondi")
+    print(f"🚀 Inizio monitoraggio... (Ctrl+C per fermare)")
+    
     target_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
-    print(f"Data di riferimento: {target_date}")
+    print(f"📅 Data di riferimento: {target_date}")
     
     while True:
         result = check_availability(token)
@@ -138,7 +181,7 @@ def main():
                     token = new_data["access_token"]
                     refresh = new_data.get("refresh_token")
                     new_data["expires_at"] = time.time() + new_data.get("expires_in", 900)
-                    save_token(new_data)
+                    save_token_cache(new_data)
                     print("Token rinnovato con successo")
                     continue
             token = get_token()
@@ -148,13 +191,8 @@ def main():
             continue
         
         if result == "rate_limit":
-            print("Rate limit (429), attendo 60 secondi...")
+            print("⚠️ Rate limit (429), attendo 60 secondi...")
             time.sleep(60)
-            continue
-        
-        if result == "account_limit":
-            print("Limite account raggiunto, attendo 30 minuti...")
-            time.sleep(30 * 60)
             continue
         
         if result is True:
@@ -166,7 +204,8 @@ def main():
                 time.sleep(60)
                 continue
             if slots and len(slots) > 0:
-                print(f"🎯 Slot trovati: {slots}")
+                print(f"🎯 Slot trovati per {target_date}: {slots}")
+                print("🏆 Appuntamento disponibile! Vai su https://egy.almaviva-visa.it")
                 break
             else:
                 print(f"Nessuno slot per la data {target_date}, continuo...")
@@ -176,4 +215,7 @@ def main():
         time.sleep(CHECK_INTERVAL_SEC)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n🛑 Monitoraggio fermato dall'utente")
