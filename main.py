@@ -4,12 +4,11 @@ import tkinter.messagebox as msgbox
 import threading
 import time
 from datetime import datetime, timedelta
-from constants import VISA_TYPES, OFFICES, DEFAULT_CHECK_INTERVAL_MIN, REQUEST_DELAY_SECONDS, OFFICE_HOURS_START, OFFICE_HOURS_END
+from constants import VISA_TYPES, OFFICES, DEFAULT_CHECK_INTERVAL_MIN, REQUEST_DELAY_SECONDS
 from config import load_config, save_config
 from proxy_manager import ProxyManager
 from notifier import send_telegram
 from api_client import AlmavivaAPIClient
-from browser_automation import BrowserAutomation
 from utils import log_message, parse_iso_slot, wait_seconds
 
 ctk.set_appearance_mode("dark")
@@ -22,7 +21,6 @@ class AlmavivaBotThread:
         self.log_callback = log_callback
         self.running = False
         self.thread = None
-        self.browser = None
         self.api = None
 
     def log(self, msg):
@@ -37,27 +35,21 @@ class AlmavivaBotThread:
 
     def stop(self):
         self.running = False
-        if self.browser:
-            self.browser.quit()
+        if self.api:
+            self.api.log("Bot fermato dall'utente.")
 
     def _monitor(self):
-        self.browser = BrowserAutomation(
-            self.account,
-            headless=self.settings.get("headless", False),
+        proxy_mgr = ProxyManager(self.settings)
+        self.api = AlmavivaAPIClient(
+            email=self.account["email"],
+            password=self.account["password"],
+            proxy_manager=proxy_mgr,
             log_callback=self.log
         )
-        if not self.browser.login():
-            self.log("Login fallito, bot fermo.")
+        if not self.api.login():
+            self.log("Login API fallito. Bot fermo.")
             self.running = False
             return
-        token = self.browser.token
-        if not token:
-            self.log("Token non disponibile, fermo.")
-            self.running = False
-            return
-
-        proxy_mgr = ProxyManager(self.settings)
-        self.api = AlmavivaAPIClient(token, proxy_mgr, log_callback=self.log)
 
         visa_name = self.account.get("visa_type")
         visa_id = VISA_TYPES.get(visa_name, 8)
@@ -71,20 +63,9 @@ class AlmavivaBotThread:
         interval_min = self.settings.get("check_interval_min", DEFAULT_CHECK_INTERVAL_MIN)
 
         self.log(f"Monitoraggio avviato: uffici={office_ids}, visto={visa_name}, data={trip_date}, intervallo={interval_min} min, delay={REQUEST_DELAY_SECONDS}s")
-        self.log(f"Controllo attivo solo nell'orario {OFFICE_HOURS_START}:00 - {OFFICE_HOURS_END}:00.")
 
         while self.running:
             try:
-                # Attendi orario ufficio
-                now = datetime.now()
-                start_time = now.replace(hour=OFFICE_HOURS_START, minute=0, second=0, microsecond=0)
-                end_time = now.replace(hour=OFFICE_HOURS_END, minute=0, second=0, microsecond=0)
-                if now < start_time:
-                    wait_seconds((start_time - now).total_seconds())
-                elif now > end_time:
-                    tomorrow_start = start_time + timedelta(days=1)
-                    wait_seconds((tomorrow_start - now).total_seconds())
-
                 for office_id in office_ids:
                     if not self.running:
                         break
@@ -102,7 +83,7 @@ class AlmavivaBotThread:
                                     d = trip_date
                                     t = "orario non specificato"
                                 office_name = "Cairo" if office_id == 1 else "Alessandria"
-                                msg = f"✅ APPUNTAMENTO TROVATO!\nUfficio: {office_name}\nData: {d}\nOra: {t}"
+                                msg = f"✅ APPUNTAMENTO TROVATO!\nUfficio: {office_name}\nData: {d}\nOra: {t}\nVai su https://egy.almaviva-visa.it"
                                 bot_token = self.settings.get("telegram_bot_token")
                                 chat_id = self.settings.get("telegram_chat_id")
                                 if bot_token and chat_id:
@@ -122,15 +103,13 @@ class AlmavivaBotThread:
                             self.log("Limite account raggiunto, attendo 30 minuti")
                             wait_seconds(30 * 60)
                             continue
+                        elif "ERRORE 400" in str(e):
+                            self.log(f"⚠️ {e}")
                         else:
                             self.log(f"Errore office {office_id}: {e}")
                     wait_seconds(5)
                 if self.running:
-                    now_hour = datetime.now().hour
-                    if OFFICE_HOURS_START <= now_hour < OFFICE_HOURS_END:
-                        wait_seconds(interval_min * 60)
-                    else:
-                        self.log("Orario ufficio terminato, attendo prossimo ciclo...")
+                    wait_seconds(interval_min * 60)
             except Exception as e:
                 self.log(f"Errore nel loop: {e}")
                 wait_seconds(60)
@@ -139,8 +118,8 @@ class AlmavivaBotThread:
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Almaviva Bot - Con Proxy")
-        self.geometry("1000x700")
+        self.title("Almaviva Bot Pro - Multi Account")
+        self.geometry("1200x800")
         self.config = load_config()
         self.bots = {}
         self._create_widgets()
@@ -175,39 +154,33 @@ class App(ctk.CTk):
         left = ctk.CTkFrame(self)
         left.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
-        # Sezione Account
+        # Sezione Account con checkbox scrollabile
         ctk.CTkLabel(left, text="ACCOUNT", font=("Arial",16,"bold")).pack(pady=(10,5))
-        self.account_list = ctk.CTkComboBox(left, values=[], width=250)
-        self.account_list.pack(pady=5)
+        self.account_frame = ctk.CTkScrollableFrame(left, width=300, height=200)
+        self.account_frame.pack(pady=5, fill="both", expand=True)
+        self.account_checkboxes = {}
+        self.refresh_account_list()
+
         btn_frame = ctk.CTkFrame(left)
         btn_frame.pack(pady=5)
         ctk.CTkButton(btn_frame, text="Nuovo", width=60, command=self.add_account).pack(side="left", padx=2)
         ctk.CTkButton(btn_frame, text="Modifica", width=60, command=self.edit_account).pack(side="left", padx=2)
         ctk.CTkButton(btn_frame, text="Elimina", width=60, command=self.delete_account).pack(side="left", padx=2)
-        ctk.CTkButton(btn_frame, text="Avvia", fg_color="green", width=80, command=self.start_monitor).pack(side="left", padx=2)
-        ctk.CTkButton(btn_frame, text="Ferma", fg_color="red", width=80, command=self.stop_all).pack(side="left", padx=2)
+        ctk.CTkButton(btn_frame, text="Avvia selezionati", fg_color="green", width=120, command=self.start_selected_monitors).pack(side="left", padx=2)
+        ctk.CTkButton(btn_frame, text="Ferma tutti", fg_color="red", width=100, command=self.stop_all).pack(side="left", padx=2)
 
         # Sezione Proxy
         ctk.CTkLabel(left, text="PROXY (OPZIONALE)", font=("Arial",14,"bold")).pack(pady=(15,5))
         self.proxy_enabled = ctk.BooleanVar(value=self.config["settings"].get("proxy_enabled", False))
         ctk.CTkCheckBox(left, text="Abilita proxy", variable=self.proxy_enabled).pack(anchor="w", padx=20)
-        
-        ctk.CTkLabel(left, text="Host (es. proxy.smartproxy.net)").pack(anchor="w", padx=20)
         self.proxy_host = ctk.CTkEntry(left, width=250)
         self.proxy_host.pack(pady=2, padx=20)
-        
-        ctk.CTkLabel(left, text="Porta").pack(anchor="w", padx=20)
         self.proxy_port = ctk.CTkEntry(left, width=250)
         self.proxy_port.pack(pady=2, padx=20)
-        
-        ctk.CTkLabel(left, text="Username (opzionale)").pack(anchor="w", padx=20)
         self.proxy_user = ctk.CTkEntry(left, width=250)
         self.proxy_user.pack(pady=2, padx=20)
-        
-        ctk.CTkLabel(left, text="Password (opzionale)").pack(anchor="w", padx=20)
         self.proxy_pass = ctk.CTkEntry(left, width=250, show="*")
         self.proxy_pass.pack(pady=2, padx=20)
-        
         ctk.CTkButton(left, text="Test Proxy", command=self.test_proxy).pack(pady=5)
 
         # Sezione Impostazioni
@@ -216,17 +189,17 @@ class App(ctk.CTk):
         self.interval.insert(0, str(self.config["settings"].get("check_interval_min", DEFAULT_CHECK_INTERVAL_MIN)))
         ctk.CTkLabel(left, text="Intervallo (minuti)").pack(anchor="w", padx=20)
         self.interval.pack(anchor="w", padx=20)
-        
         self.headless_var = ctk.BooleanVar(value=self.config["settings"].get("headless", False))
-        ctk.CTkCheckBox(left, text="Modalità Headless (browser invisibile)", variable=self.headless_var).pack(anchor="w", padx=20)
+        ctk.CTkCheckBox(left, text="Modalità headless (non usata)", variable=self.headless_var).pack(anchor="w", padx=20)
+        self.auto_book_var = ctk.BooleanVar(value=self.config["settings"].get("auto_book", False))
+        ctk.CTkCheckBox(left, text="Prenotazione automatica (non implementata)", variable=self.auto_book_var).pack(anchor="w", padx=20)
 
         # Sezione Telegram
-        ctk.CTkLabel(left, text="TELEGRAM NOTIFICHE", font=("Arial",14,"bold")).pack(pady=(15,5))
+        ctk.CTkLabel(left, text="TELEGRAM", font=("Arial",14,"bold")).pack(pady=(15,5))
         self.tg_token = ctk.CTkEntry(left, width=250)
         self.tg_token.insert(0, self.config["settings"].get("telegram_bot_token", ""))
         ctk.CTkLabel(left, text="Bot Token").pack(anchor="w", padx=20)
         self.tg_token.pack(pady=2, padx=20)
-        
         self.tg_chat = ctk.CTkEntry(left, width=250)
         self.tg_chat.insert(0, self.config["settings"].get("telegram_chat_id", ""))
         ctk.CTkLabel(left, text="Chat ID").pack(anchor="w", padx=20)
@@ -234,30 +207,48 @@ class App(ctk.CTk):
 
         ctk.CTkButton(left, text="Salva impostazioni", command=self.save_settings).pack(pady=10)
 
-        # Sezione Log
+        # Log area
         right = ctk.CTkFrame(self)
         right.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
         ctk.CTkLabel(right, text="LOG", font=("Arial",16,"bold")).pack(pady=5)
         self.log_text = ctk.CTkTextbox(right, height=600)
         self.log_text.pack(fill="both", expand=True, padx=10, pady=10)
 
-        self.refresh_account_list()
-
     def refresh_account_list(self):
-        names = [acc.get("name", "Senza nome") for acc in self.config.get("accounts", [])]
-        self.account_list.configure(values=names)
-        if names:
-            self.account_list.set(names[0])
+        for widget in self.account_frame.winfo_children():
+            widget.destroy()
+        self.account_checkboxes.clear()
+        for acc in self.config.get("accounts", []):
+            name = acc.get("name", "Senza nome")
+            var = ctk.BooleanVar(value=False)
+            cb = ctk.CTkCheckBox(self.account_frame, text=name, variable=var)
+            cb.pack(anchor="w", padx=10, pady=2)
+            self.account_checkboxes[name] = var
 
     def add_account(self):
         self.open_account_editor()
 
     def edit_account(self):
-        selected = self.account_list.get()
-        if selected:
-            acc = next((a for a in self.config["accounts"] if a.get("name") == selected), None)
-            if acc:
-                self.open_account_editor(acc)
+        selected = [name for name, var in self.account_checkboxes.items() if var.get()]
+        if not selected:
+            msgbox.showerror("Errore", "Seleziona un account da modificare")
+            return
+        if len(selected) > 1:
+            msgbox.showwarning("Attenzione", "Modifico solo il primo account selezionato")
+        acc = next((a for a in self.config["accounts"] if a.get("name") == selected[0]), None)
+        if acc:
+            self.open_account_editor(acc)
+
+    def delete_account(self):
+        selected = [name for name, var in self.account_checkboxes.items() if var.get()]
+        if not selected:
+            msgbox.showerror("Errore", "Seleziona almeno un account")
+            return
+        for name in selected:
+            self.config["accounts"] = [a for a in self.config["accounts"] if a.get("name") != name]
+        save_config(self.config)
+        self.refresh_account_list()
+        self._log(f"Eliminati: {', '.join(selected)}")
 
     def open_account_editor(self, account=None):
         editor = ctk.CTkToplevel(self)
@@ -284,6 +275,7 @@ class App(ctk.CTk):
             ("phone", "Telefono"),
             ("trip_date", "Data viaggio (YYYY-MM-DD)"),
             ("destination", "Destinazione"),
+            ("proxy", "Proxy (host:port:user:pass)"),
             ("service_level_id", "Service Level ID (1)"),
             ("persons", "Numero persone (default 1)"),
         ]
@@ -334,7 +326,7 @@ class App(ctk.CTk):
             for key in ["name", "first_name", "last_name", "email", "password", "birth_date",
                         "gender", "nationality", "residence", "passport_number", "passport_issue_date",
                         "passport_country", "passport_expiry", "phone", "trip_date", "destination",
-                        "persons"]:
+                        "proxy", "persons"]:
                 val = entries.get(key)
                 if val is not None:
                     new_acc[key] = val.get()
@@ -361,12 +353,38 @@ class App(ctk.CTk):
 
         ctk.CTkButton(scroll_frame, text="Salva", command=save).grid(row=row, column=0, columnspan=2, pady=20)
 
-    def delete_account(self):
-        selected = self.account_list.get()
-        if selected:
-            self.config["accounts"] = [a for a in self.config["accounts"] if a.get("name") != selected]
-            save_config(self.config)
-            self.refresh_account_list()
+    def start_selected_monitors(self):
+        selected = [name for name, var in self.account_checkboxes.items() if var.get()]
+        if not selected:
+            msgbox.showerror("Errore", "Seleziona almeno un account")
+            return
+        for name in selected:
+            acc = next((a for a in self.config["accounts"] if a.get("name") == name), None)
+            if not acc:
+                continue
+            if name in self.bots and self.bots[name].running:
+                self._log(f"Monitoraggio già attivo per {name}")
+                continue
+            settings = self.config["settings"].copy()
+            settings.update({
+                "check_interval_min": int(self.interval.get()),
+                "headless": self.headless_var.get(),
+                "auto_book": self.auto_book_var.get(),
+                "proxy_enabled": self.proxy_enabled.get(),
+                "proxy_list": self.config["settings"].get("proxy_list", []),
+                "telegram_bot_token": self.tg_token.get(),
+                "telegram_chat_id": self.tg_chat.get(),
+            })
+            bot = AlmavivaBotThread(acc, settings, self._log)
+            bot.start()
+            self.bots[name] = bot
+            self._log(f"Avviato monitoraggio per {name}")
+
+    def stop_all(self):
+        for name, bot in self.bots.items():
+            bot.stop()
+        self.bots.clear()
+        self._log("Fermati tutti i monitoraggi")
 
     def save_settings(self):
         host = self.proxy_host.get().strip()
@@ -379,7 +397,6 @@ class App(ctk.CTk):
                 proxy_list.append(f"{host}:{port}:{user}:{pwd}")
             else:
                 proxy_list.append(f"{host}:{port}")
-        
         self.config["settings"]["proxy_list"] = proxy_list
         self.config["settings"]["proxy_enabled"] = self.proxy_enabled.get()
         self.config["settings"]["proxy_host"] = host
@@ -388,62 +405,23 @@ class App(ctk.CTk):
         self.config["settings"]["proxy_password"] = pwd
         self.config["settings"]["check_interval_min"] = int(self.interval.get())
         self.config["settings"]["headless"] = self.headless_var.get()
+        self.config["settings"]["auto_book"] = self.auto_book_var.get()
         self.config["settings"]["telegram_bot_token"] = self.tg_token.get()
         self.config["settings"]["telegram_chat_id"] = self.tg_chat.get()
         save_config(self.config)
         msgbox.showinfo("Info", "Impostazioni salvate")
 
     def test_proxy(self):
-        host = self.proxy_host.get().strip()
-        port = self.proxy_port.get().strip()
-        user = self.proxy_user.get().strip()
-        pwd = self.proxy_pass.get().strip()
-        if not host or not port:
-            msgbox.showerror("Errore", "Inserisci host e porta")
+        proxy_list = self.config["settings"].get("proxy_list", [])
+        if not proxy_list:
+            msgbox.showerror("Errore", "Nessun proxy configurato. Inserisci host/porta e salva.")
             return
-        try:
-            proxy_url = f"http://{host}:{port}"
-            proxies = {"http": proxy_url, "https": proxy_url}
-            if user and pwd:
-                proxy_url_with_auth = f"http://{user}:{pwd}@{host}:{port}"
-                proxies = {"http": proxy_url_with_auth, "https": proxy_url_with_auth}
-            r = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=15)
-            self._log(f"Test proxy riuscito: IP = {r.json().get('origin')}")
-            msgbox.showinfo("Proxy OK", f"IP del proxy: {r.json().get('origin')}")
-        except Exception as e:
-            self._log(f"Test proxy fallito: {e}")
-            msgbox.showerror("Proxy Fallito", str(e))
-
-    def start_monitor(self):
-        selected = self.account_list.get()
-        if not selected:
-            msgbox.showerror("Errore", "Seleziona un account")
-            return
-        acc = next((a for a in self.config["accounts"] if a.get("name") == selected), None)
-        if not acc:
-            return
-        if selected in self.bots and self.bots[selected].running:
-            msgbox.showinfo("Info", "Monitoraggio già attivo")
-            return
-        settings = self.config["settings"].copy()
-        settings.update({
-            "check_interval_min": int(self.interval.get()),
-            "headless": self.headless_var.get(),
-            "proxy_enabled": self.proxy_enabled.get(),
-            "proxy_list": self.config["settings"].get("proxy_list", []),
-            "telegram_bot_token": self.tg_token.get(),
-            "telegram_chat_id": self.tg_chat.get(),
-        })
-        bot = AlmavivaBotThread(acc, settings, self._log)
-        bot.start()
-        self.bots[selected] = bot
-        self._log(f"Avviato monitoraggio per {selected}")
-
-    def stop_all(self):
-        for name, bot in self.bots.items():
-            bot.stop()
-        self.bots.clear()
-        self._log("Fermati tutti i monitoraggi")
+        proxy_mgr = ProxyManager({"proxy_enabled": True, "proxy_list": proxy_list})
+        ok, msg = proxy_mgr.test_proxy(self._log)
+        if ok:
+            msgbox.showinfo("Proxy OK", f"IP: {msg}")
+        else:
+            msgbox.showerror("Proxy Fallito", msg)
 
 if __name__ == "__main__":
     app = App()
