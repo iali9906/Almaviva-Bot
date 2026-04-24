@@ -16,11 +16,14 @@ VISA_TYPES = {
 # Uffici
 OFFICES = {"Cairo": 1, "Alessandria": 2}
 
-# API endpoints
-BASE_URL = "https://egyapi.almaviva-visa.it"
-CHECKS_URL = f"{BASE_URL}/reservation-manager/api/planning/v1/checks"
-FREE_SLOTS_URL = f"{BASE_URL}/reservation-manager/api/slots/v1/free"
+# Endpoint API
+AUTH_TOKEN_URL = "https://egyiam.almaviva-visa.it/realms/oauth2-visaSystem-realm-pkce/protocol/openid-connect/token"
+CHECKS_URL = "https://egyapi.almaviva-visa.it/reservation-manager/api/planning/v1/checks"
+FREE_SLOTS_URL = "https://egyapi.almaviva-visa.it/reservation-manager/api/slots/v1/free"
 LOGIN_URL = "https://egy.almaviva-visa.it"
+
+# Parametri client per il login OAuth2
+CLIENT_ID = "aa-visasys-public"
 
 # Temporizzazioni
 DEFAULT_CHECK_INTERVAL_MIN = 5
