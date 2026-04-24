@@ -38,6 +38,15 @@ class AlmavivaBotThread:
         if self.api:
             self.api.log("Bot fermato dall'utente.")
 
+    def _send_notification(self, message):
+        """Invia notifica Telegram se configurato"""
+        bot_token = self.settings.get("telegram_bot_token")
+        chat_id = self.settings.get("telegram_chat_id")
+        if bot_token and chat_id:
+            send_telegram(bot_token, chat_id, message, self.log)
+        else:
+            self.log(f"⚠️ Notifica non inviata: token={'✅' if bot_token else '❌'}, chat_id={'✅' if chat_id else '❌'}")
+
     def _monitor(self):
         proxy_mgr = ProxyManager(self.settings)
         self.api = AlmavivaAPIClient(
@@ -50,6 +59,9 @@ class AlmavivaBotThread:
             self.log("Login API fallito. Bot fermo.")
             self.running = False
             return
+
+        # Debug: verifica che i token siano presenti
+        self.log(f"🔍 Config Telegram: token={'✅' if self.settings.get('telegram_bot_token') else '❌'}, chat_id={'✅' if self.settings.get('telegram_chat_id') else '❌'}")
 
         visa_name = self.account.get("visa_type")
         visa_id = VISA_TYPES.get(visa_name, 8)
@@ -84,10 +96,7 @@ class AlmavivaBotThread:
                                     t = "orario non specificato"
                                 office_name = "Cairo" if office_id == 1 else "Alessandria"
                                 msg = f"✅ APPUNTAMENTO TROVATO!\nUfficio: {office_name}\nData: {d}\nOra: {t}\nVai su https://egy.almaviva-visa.it"
-                                bot_token = self.settings.get("telegram_bot_token")
-                                chat_id = self.settings.get("telegram_chat_id")
-                                if bot_token and chat_id:
-                                    send_telegram(bot_token, chat_id, msg, self.log)
+                                self._send_notification(msg)
                                 self.log(msg)
                                 self.running = False
                                 break
@@ -114,7 +123,7 @@ class AlmavivaBotThread:
                 self.log(f"Errore nel loop: {e}")
                 wait_seconds(60)
 
-
+# ==================== INTERFACCIA GRAFICA ====================
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -154,7 +163,6 @@ class App(ctk.CTk):
         left = ctk.CTkFrame(self)
         left.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
-        # Sezione Account con checkbox scrollabile
         ctk.CTkLabel(left, text="ACCOUNT", font=("Arial",16,"bold")).pack(pady=(10,5))
         self.account_frame = ctk.CTkScrollableFrame(left, width=300, height=200)
         self.account_frame.pack(pady=5, fill="both", expand=True)
@@ -169,7 +177,6 @@ class App(ctk.CTk):
         ctk.CTkButton(btn_frame, text="Avvia selezionati", fg_color="green", width=120, command=self.start_selected_monitors).pack(side="left", padx=2)
         ctk.CTkButton(btn_frame, text="Ferma tutti", fg_color="red", width=100, command=self.stop_all).pack(side="left", padx=2)
 
-        # Sezione Proxy
         ctk.CTkLabel(left, text="PROXY (OPZIONALE)", font=("Arial",14,"bold")).pack(pady=(15,5))
         self.proxy_enabled = ctk.BooleanVar(value=self.config["settings"].get("proxy_enabled", False))
         ctk.CTkCheckBox(left, text="Abilita proxy", variable=self.proxy_enabled).pack(anchor="w", padx=20)
@@ -183,7 +190,6 @@ class App(ctk.CTk):
         self.proxy_pass.pack(pady=2, padx=20)
         ctk.CTkButton(left, text="Test Proxy", command=self.test_proxy).pack(pady=5)
 
-        # Sezione Impostazioni
         ctk.CTkLabel(left, text="IMPOSTAZIONI", font=("Arial",14,"bold")).pack(pady=(15,5))
         self.interval = ctk.CTkEntry(left, width=100)
         self.interval.insert(0, str(self.config["settings"].get("check_interval_min", DEFAULT_CHECK_INTERVAL_MIN)))
@@ -194,7 +200,6 @@ class App(ctk.CTk):
         self.auto_book_var = ctk.BooleanVar(value=self.config["settings"].get("auto_book", False))
         ctk.CTkCheckBox(left, text="Prenotazione automatica (non implementata)", variable=self.auto_book_var).pack(anchor="w", padx=20)
 
-        # Sezione Telegram
         ctk.CTkLabel(left, text="TELEGRAM", font=("Arial",14,"bold")).pack(pady=(15,5))
         self.tg_token = ctk.CTkEntry(left, width=250)
         self.tg_token.insert(0, self.config["settings"].get("telegram_bot_token", ""))
@@ -207,7 +212,6 @@ class App(ctk.CTk):
 
         ctk.CTkButton(left, text="Salva impostazioni", command=self.save_settings).pack(pady=10)
 
-        # Log area
         right = ctk.CTkFrame(self)
         right.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
         ctk.CTkLabel(right, text="LOG", font=("Arial",16,"bold")).pack(pady=5)
