@@ -3,6 +3,7 @@
 Almaviva Bot - CLI Interface
 Monitoraggio appuntamenti da riga di comando.
 LEGGE TUTTI I DATI dal file almaviva_config.json
+Invia notifiche Telegram quando trova un appuntamento.
 """
 import requests
 import time
@@ -87,6 +88,24 @@ def load_first_account(config):
     
     return email, password, visa_id, office_id, service_level_id, trip_date, persons, destination, all_offices
 
+def get_telegram_settings(config):
+    """Estrae token e chat ID di Telegram dalle impostazioni globali"""
+    settings = config.get("settings", {})
+    token = settings.get("telegram_bot_token", "")
+    chat_id = settings.get("telegram_chat_id", "")
+    return token, chat_id
+
+def send_telegram(bot_token, chat_id, message):
+    """Invia un messaggio Telegram"""
+    if not bot_token or not chat_id:
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        r = requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=5)
+        return r.status_code == 200
+    except:
+        return False
+
 # ==================== CARICA CONFIGURAZIONI ====================
 config_data = load_config_from_file()
 if not config_data:
@@ -98,6 +117,13 @@ EMAIL, PASSWORD, VISA_ID, OFFICE_ID, SERVICE_LEVEL, TRIP_DATE, PERSONS, DESTINAT
 if not EMAIL or not PASSWORD:
     print("Impossibile proseguire. Verifica che almaviva_config.json contenga un account valido.")
     exit(1)
+
+# Carica impostazioni Telegram
+TELEGRAM_TOKEN, TELEGRAM_CHAT = get_telegram_settings(config_data)
+if TELEGRAM_TOKEN and TELEGRAM_CHAT:
+    print("✅ Notifiche Telegram attive")
+else:
+    print("⚠️ Telegram non configurato (token o chat ID mancanti)")
 
 # Imposta la data di viaggio (se non presente, usa tra 30 giorni)
 if not TRIP_DATE:
@@ -263,7 +289,15 @@ def main():
                     continue
                 if slots and len(slots) > 0:
                     print(f"🎯 Slot trovati per {TRIP_DATE}: {slots}")
-                    print(f"🏆 Appuntamento disponibile! Vai su https://egy.almaviva-visa.it")
+                    msg = f"✅ APPUNTAMENTO TROVATO!\nUfficio: {office_name}\nData: {TRIP_DATE}\nVai su https://egy.almaviva-visa.it"
+                    print(f"🏆 {msg}")
+                    if TELEGRAM_TOKEN and TELEGRAM_CHAT:
+                        if send_telegram(TELEGRAM_TOKEN, TELEGRAM_CHAT, msg):
+                            print("📨 Notifica Telegram inviata con successo")
+                        else:
+                            print("❌ Invio notifica Telegram fallito")
+                    else:
+                        print("⚠️ Telegram non configurato, notifica non inviata")
                     return
                 else:
                     print(f"Nessuno slot per la data {TRIP_DATE}, continuo...")
