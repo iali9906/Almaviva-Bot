@@ -15,7 +15,8 @@ DEFAULT_CONFIG = {
         "proxy_port": "",
         "proxy_username": "",
         "proxy_password": "",
-        "headless": False
+        "headless": False,
+        "auto_book": False
     }
 }
 

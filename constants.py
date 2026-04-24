@@ -20,17 +20,16 @@ OFFICES = {"Cairo": 1, "Alessandria": 2}
 AUTH_TOKEN_URL = "https://egyiam.almaviva-visa.it/realms/oauth2-visaSystem-realm-pkce/protocol/openid-connect/token"
 CHECKS_URL = "https://egyapi.almaviva-visa.it/reservation-manager/api/planning/v1/checks"
 FREE_SLOTS_URL = "https://egyapi.almaviva-visa.it/reservation-manager/api/slots/v1/free"
-LOGIN_URL = "https://egy.almaviva-visa.it"
 
 # Parametri client per il login OAuth2
 CLIENT_ID = "aa-visasys-public"
 
-# Temporizzazioni
+# Limiti e temporizzazioni
 DEFAULT_CHECK_INTERVAL_MIN = 5
 REQUEST_DELAY_SECONDS = 30
 MAX_RETRIES = 3
 BASE_BACKOFF_SECONDS = 60
 
-# Orario di ufficio
+# Orario di ufficio (disabilitato nel codice)
 OFFICE_HOURS_START = 9
 OFFICE_HOURS_END = 16
