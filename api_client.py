@@ -14,6 +14,7 @@ class AlmavivaAPIClient:
         self.refresh_token = None
         self.token_expiry = 0
         self.session = requests.Session()
+        self.request_counter = 0
 
     def log(self, msg):
         if self.log_callback:
@@ -25,6 +26,16 @@ class AlmavivaAPIClient:
             if proxy_url:
                 return {"http": proxy_url, "https": proxy_url}
         return None
+
+    def _get_current_ip(self):
+        """Ottiene l'IP pubblico attuale (del proxy o della connessione diretta)."""
+        try:
+            resp = self.session.get("https://httpbin.org/ip", timeout=5)
+            ip = resp.json().get("origin", "sconosciuto")
+            return ip
+        except Exception as e:
+            self.log(f"⚠️ Impossibile ottenere IP: {e}")
+            return "non rilevabile"
 
     def login(self):
         self.log("🔑 Login via API in corso...")
@@ -62,32 +73,72 @@ class AlmavivaAPIClient:
         return True
 
     def _request_with_backoff(self, method, url, **kwargs):
+        self.request_counter += 1
+        
+        # Log IP ogni 10 richieste
+        if self.request_counter % 10 == 0:
+            current_ip = self._get_current_ip()
+            self.log(f"🌐 IP utilizzato per la richiesta: {current_ip}")
+        
         for attempt in range(MAX_RETRIES):
             if not self._ensure_token():
                 raise Exception("Token non valido")
+            
             headers = kwargs.pop("headers", {})
             headers["Authorization"] = f"Bearer {self.token}"
+            
+            # Aggiorna proxy se presente
+            proxy_dict = self._get_proxy_dict()
+            if proxy_dict:
+                self.session.proxies.update(proxy_dict)
+            
             try:
                 resp = self.session.request(method, url, headers=headers, timeout=30, **kwargs)
+                
+                # Gestione 429 Too Many Requests con backoff esponenziale
                 if resp.status_code == 429:
                     retry_after = resp.headers.get('Retry-After')
                     if retry_after:
-                        wait_seconds(int(retry_after))
+                        wait = int(retry_after)
                     else:
-                        wait_seconds(BASE_BACKOFF_SECONDS * (2 ** attempt))
+                        wait = BASE_BACKOFF_SECONDS * (2 ** attempt)
+                    self.log(f"Rate limit 429, attendo {wait} secondi")
+                    wait_seconds(wait)
                     continue
+                
+                # Gestione token scaduto
                 if resp.status_code == 401:
+                    self.log("Token scaduto, rinnovo...")
                     self.token = None
                     continue
+                
+                # Gestione errore 400 con messaggio specifico
+                if resp.status_code == 400:
+                    try:
+                        error_data = resp.json()
+                        if "check-can-create" in str(error_data):
+                            self.log("⚠️ Limite account raggiunto, attendo 30 minuti...")
+                            wait_seconds(30 * 60)
+                            continue
+                        self.log(f"⚠️ ERRORE 400: {error_data.get('message', 'Richiesta non valida')}")
+                    except:
+                        self.log("⚠️ ERRORE 400: Richiesta non valida")
+                    continue
+                
                 resp.raise_for_status()
                 return resp
+                
             except requests.exceptions.Timeout:
+                if attempt == MAX_RETRIES - 1:
+                    raise Exception("Timeout persistente dopo i tentativi")
+                wait_seconds(BASE_BACKOFF_SECONDS * (2 ** attempt))
+                continue
+            except Exception as e:
                 if attempt == MAX_RETRIES - 1:
                     raise
                 wait_seconds(BASE_BACKOFF_SECONDS * (2 ** attempt))
                 continue
-            except Exception as e:
-                raise e
+        
         raise Exception("Max retries exceeded")
 
     def check_availability(self, office_id, visa_id, service_level_id=1):
