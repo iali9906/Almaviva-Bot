@@ -2,7 +2,7 @@
 """
 Almaviva Bot - CLI Engine
 Monitoraggio appuntamenti per singolo account con gestione automatica limiti.
-Supporto proxy.
+Supporto proxy (escluso per Telegram).
 """
 import argparse
 import sys
@@ -101,7 +101,7 @@ def get_token(email, password, session):
         "password": password
     }
     try:
-        r = session.post(AUTH_TOKEN_URL, headers=headers, data=data, timeout=30)
+        r = session.post(AUTH_TOKEN_URL, headers=headers, data=data, timeout=60)
         if r.status_code != 200:
             log(f"❌ Login fallito: {r.status_code}")
             return None, None
@@ -120,7 +120,7 @@ def refresh_token(refresh_token_value, session):
         "refresh_token": refresh_token_value
     }
     try:
-        r = session.post(AUTH_TOKEN_URL, headers=headers, data=data, timeout=30)
+        r = session.post(AUTH_TOKEN_URL, headers=headers, data=data, timeout=60)
         if r.status_code != 200:
             return None
         return r.json()
@@ -167,12 +167,19 @@ def get_free_slots(token, office_id, date, quantity, rate_limiter, session):
         rate_limiter.increment()
         return [], None, None
 
-def send_telegram(bot_token, chat_id, message, session):
+def send_telegram(bot_token, chat_id, message):
+    """Invia notifica Telegram SENZA proxy (usa una sessione pulita)"""
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        r = session.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=5)
-        return r.status_code == 200
-    except:
+        with requests.Session() as sess:
+            r = sess.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=10)
+            if r.status_code == 200:
+                log("✅ Notifica Telegram inviata")
+            else:
+                log(f"⚠️ Risposta Telegram: {r.status_code} - {r.text}")
+            return r.status_code == 200
+    except Exception as e:
+        log(f"❌ Errore invio Telegram: {e}")
         return False
 
 def get_current_ip(session):
@@ -284,10 +291,7 @@ def main():
 
                     log(f"Notifica inviata per {display_name}")
                     if args.telegram_token and args.telegram_chat:
-                        send_telegram(args.telegram_token, args.telegram_chat, msg, session)
-                        log("✅ Notifica Telegram inviata")
-                    else:
-                        log("⚠️ Telegram non configurato, notifica non inviata")
+                        send_telegram(args.telegram_token, args.telegram_chat, msg)
                     return 0
                 else:
                     log("Nessuno slot per la data selezionata")
