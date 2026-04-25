@@ -17,6 +17,7 @@ VISA_TYPES = {
 OFFICES = {"Cairo": 1, "Alessandria": 2}
 
 # Endpoint API
+BASE_URL = "https://egyapi.almaviva-visa.it"
 AUTH_TOKEN_URL = "https://egyiam.almaviva-visa.it/realms/oauth2-visaSystem-realm-pkce/protocol/openid-connect/token"
 CHECKS_URL = "https://egyapi.almaviva-visa.it/reservation-manager/api/planning/v1/checks"
 FREE_SLOTS_URL = "https://egyapi.almaviva-visa.it/reservation-manager/api/slots/v1/free"

@@ -41,11 +41,13 @@ class BotProcess:
             sys.executable, "bot_cli.py",
             "--email", email,
             "--password", password,
+            "--account-name", self.account.get("name", ""),
             "--visa-id", str(visa_id),
             "--office-ids", ",".join(str(o) for o in office_ids),
             "--interval-min", str(interval_min),
             "--service-level", str(service_level),
-            "--persons", str(persons)
+            "--persons", str(persons),
+            "--bot-name", "IBRA TECH Bot Controller"
         ]
         if trip_date:
             cmd.extend(["--trip-date", trip_date])

@@ -2,6 +2,7 @@
 """
 Almaviva Bot - CLI Engine
 Monitoraggio appuntamenti per singolo account con gestione automatica limiti.
+Notifiche Telegram personalizzate con nome account e firma.
 """
 import argparse
 import sys
@@ -11,7 +12,7 @@ import os
 from datetime import datetime, timedelta
 import requests
 
-from constants import AUTH_TOKEN_URL, CLIENT_ID, CHECKS_URL, FREE_SLOTS_URL
+from constants import AUTH_TOKEN_URL, CLIENT_ID, CHECKS_URL, FREE_SLOTS_URL, VISA_TYPES, OFFICES
 from utils import wait_seconds
 
 COUNTERS_FILE = "request_counters.json"
@@ -129,66 +130,88 @@ def check_availability(token, office_id, visa_id, service_level, rate_limiter):
     rate_limiter.wait_if_needed()
     url = f"{CHECKS_URL}?officeId={office_id}&visaId={visa_id}&serviceLevelId={service_level}"
     headers = {"Authorization": f"Bearer {token}"}
+    start = time.time()
     try:
         r = requests.get(url, headers=headers, timeout=10)
+        elapsed = (time.time() - start) * 1000
         if r.status_code == 401:
-            return "expired"
+            return "expired", elapsed, r.status_code
         if r.status_code == 429:
-            return "rate_limit"
+            return "rate_limit", elapsed, r.status_code
         r.raise_for_status()
         rate_limiter.increment()
-        return r.json()
+        return r.json(), elapsed, r.status_code
     except Exception as e:
         log(f"Errore check: {e}")
         rate_limiter.increment()
-        return False
+        return False, None, None
 
 def get_free_slots(token, office_id, date, quantity, rate_limiter):
     rate_limiter.wait_if_needed()
     url = f"{FREE_SLOTS_URL}?officeId={office_id}&quantity={quantity}&date={date}&type=WEB"
     headers = {"Authorization": f"Bearer {token}"}
+    start = time.time()
     try:
         r = requests.get(url, headers=headers, timeout=10)
+        elapsed = (time.time() - start) * 1000
         if r.status_code == 401:
-            return "expired"
+            return "expired", elapsed, r.status_code
         if r.status_code == 429:
-            return "rate_limit"
+            return "rate_limit", elapsed, r.status_code
         r.raise_for_status()
         rate_limiter.increment()
-        return r.json()
+        return r.json(), elapsed, r.status_code
     except Exception as e:
         log(f"Errore slots: {e}")
         rate_limiter.increment()
-        return []
+        return [], None, None
 
 def send_telegram(bot_token, chat_id, message):
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        r = requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=5)
+        r = requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=5)
         return r.status_code == 200
     except:
         return False
 
+def get_current_ip():
+    try:
+        r = requests.get("https://api.ipify.org", timeout=5)
+        return r.text.strip()
+    except:
+        return "sconosciuto"
+
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--email', required=True)
-    parser.add_argument('--password', required=True)
-    parser.add_argument('--visa-id', type=int, default=8)
-    parser.add_argument('--office-ids', default='1,2')
-    parser.add_argument('--trip-date')
-    parser.add_argument('--interval-min', type=int, default=5)
-    parser.add_argument('--telegram-token', default='')
-    parser.add_argument('--telegram-chat', default='')
-    parser.add_argument('--service-level', type=int, default=1)
-    parser.add_argument('--persons', type=int, default=1)
+    parser = argparse.ArgumentParser(description='Almaviva Bot CLI Engine')
+    parser.add_argument('--email', required=True, help='Email account')
+    parser.add_argument('--password', required=True, help='Password')
+    parser.add_argument('--account-name', default='', help='Nome visualizzato dell\'account')
+    parser.add_argument('--visa-id', type=int, default=8, help='Visa ID')
+    parser.add_argument('--office-ids', default='1,2', help='Uffici (es. 1,2)')
+    parser.add_argument('--trip-date', help='Data viaggio (YYYY-MM-DD)')
+    parser.add_argument('--interval-min', type=int, default=5, help='Intervallo tra cicli (minuti)')
+    parser.add_argument('--telegram-token', default='', help='Token bot Telegram')
+    parser.add_argument('--telegram-chat', default='', help='Chat ID Telegram')
+    parser.add_argument('--service-level', type=int, default=1, help='Service level ID')
+    parser.add_argument('--persons', type=int, default=1, help='Numero persone')
+    parser.add_argument('--destination', default='', help='Destinazione')
+    parser.add_argument('--bot-name', default='Almaviva Bot', help='Nome del bot per le notifiche')
     args = parser.parse_args()
 
     office_ids = [int(x) for x in args.office_ids.split(',')]
     trip_date = args.trip_date or (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     interval_sec = args.interval_min * 60
 
-    log(f"Avvio monitoraggio per {args.email}")
-    log(f"Visto ID: {args.visa_id}, Uffici: {office_ids}, Data viaggio: {trip_date}")
+    visa_name = "Sconosciuto"
+    for name, vid in VISA_TYPES.items():
+        if vid == args.visa_id:
+            visa_name = name
+            break
+
+    display_name = args.account_name if args.account_name else args.email
+
+    log(f"Avvio monitoraggio per {display_name}")
+    log(f"Visto ID: {args.visa_id} ({visa_name}), Uffici: {office_ids}, Data viaggio: {trip_date}")
     log(f"Intervallo: {args.interval_min} minuti")
 
     rate_limiter = RateLimiter(args.email)
@@ -196,9 +219,13 @@ def main():
     if not token:
         return 1
 
+    current_ip = get_current_ip()
+
     while True:
         for office_id in office_ids:
-            result = check_availability(token, office_id, args.visa_id, args.service_level, rate_limiter)
+            office_name = "Cairo" if office_id == 1 else "Alessandria"
+            result, rtt_check, status_check = check_availability(token, office_id, args.visa_id, args.service_level, rate_limiter)
+            
             if result == "expired":
                 log("Token scaduto, rinnovo...")
                 if refresh:
@@ -213,19 +240,33 @@ def main():
                     time.sleep(60)
                 continue
             if result == "rate_limit":
-                log("Rate limit (429), attendo 60s")
+                log("Rate limit (429), attendo 60 secondi")
                 time.sleep(60)
                 continue
             if result is True:
-                office_name = "Cairo" if office_id == 1 else "Alessandria"
                 log(f"✅ Disponibilità per {office_name}! Recupero slot...")
-                slots = get_free_slots(token, office_id, trip_date, args.persons, rate_limiter)
+                slots, rtt_slots, status_slots = get_free_slots(token, office_id, trip_date, args.persons, rate_limiter)
                 if slots and len(slots) > 0:
-                    msg = f"✅ APPUNTAMENTO TROVATO!\nUfficio: {office_name}\nData: {trip_date}\nVai su https://egy.almaviva-visa.it"
-                    log(msg)
+                    msg = f"<b>🎯 <u>SLOT TROVATO PER {display_name}</u></b> 🎯\n"
+                    msg += f"<b>🤖 Bot:</b> {args.bot_name}\n"
+                    msg += f"<b>📧 Email:</b> {args.email}\n"
+                    msg += f"<b>🏢 Centro:</b> {office_name}\n"
+                    msg += f"<b>💳 Servizio:</b> Standard - EGP 1875\n"
+                    msg += f"<b>🎫 Visto:</b> {visa_name}\n"
+                    msg += f"<b>📅 Data viaggio:</b> {trip_date}\n"
+                    msg += f"<b>⏰ Slot disponibile:</b> {slots[0] if slots else 'N/A'}\n"
+                    msg += f"<b>🌐 IP utilizzato:</b> {current_ip}\n"
+                    msg += f"<b>📊 RTT /checks:</b> {rtt_check:.0f} ms (status {status_check})\n" if rtt_check else ""
+                    msg += f"<b>📊 RTT /free:</b> {rtt_slots:.0f} ms (status {status_slots})\n" if rtt_slots else ""
+                    msg += f"<b>Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    msg += f"\nBY Ibrahim ALI"
+
+                    log(f"Notifica inviata per {display_name}")
                     if args.telegram_token and args.telegram_chat:
                         send_telegram(args.telegram_token, args.telegram_chat, msg)
-                        log("Notifica Telegram inviata")
+                        log("✅ Notifica Telegram inviata")
+                    else:
+                        log("⚠️ Telegram non configurato, notifica non inviata")
                     return 0
                 else:
                     log("Nessuno slot per la data selezionata")
