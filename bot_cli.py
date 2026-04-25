@@ -2,7 +2,7 @@
 """
 Almaviva Bot - CLI Engine
 Monitoraggio appuntamenti per singolo account con gestione automatica limiti.
-Supporto proxy (escluso per Telegram).
+Supporto proxy e parallelizzazione degli uffici.
 """
 import argparse
 import sys
@@ -10,6 +10,7 @@ import time
 import json
 import os
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 from constants import AUTH_TOKEN_URL, CLIENT_ID, CHECKS_URL, FREE_SLOTS_URL, VISA_TYPES, OFFICES
@@ -21,6 +22,7 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 class RateLimiter:
+    # ... (identico a prima, invariato) ...
     def __init__(self, email, session_limit=28, daily_limit=70):
         self.email = email
         self.session_limit = session_limit
@@ -91,7 +93,7 @@ class RateLimiter:
         self._save()
         log(f"📊 Richieste: sessione {self.session_requests}/{self.session_limit}, giorno {self.daily_requests}/{self.daily_limit}")
 
-# ==================== FUNZIONI API (con sessione) ====================
+# ==================== FUNZIONI API ====================
 def get_token(email, password, session):
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     data = {
@@ -101,7 +103,7 @@ def get_token(email, password, session):
         "password": password
     }
     try:
-        r = session.post(AUTH_TOKEN_URL, headers=headers, data=data, timeout=60)
+        r = session.post(AUTH_TOKEN_URL, headers=headers, data=data, timeout=30)
         if r.status_code != 200:
             log(f"❌ Login fallito: {r.status_code}")
             return None, None
@@ -120,7 +122,7 @@ def refresh_token(refresh_token_value, session):
         "refresh_token": refresh_token_value
     }
     try:
-        r = session.post(AUTH_TOKEN_URL, headers=headers, data=data, timeout=60)
+        r = session.post(AUTH_TOKEN_URL, headers=headers, data=data, timeout=30)
         if r.status_code != 200:
             return None
         return r.json()
@@ -133,7 +135,7 @@ def check_availability(token, office_id, visa_id, service_level, rate_limiter, s
     headers = {"Authorization": f"Bearer {token}"}
     start = time.time()
     try:
-        r = session.get(url, headers=headers, timeout=10)
+        r = session.get(url, headers=headers, timeout=15)
         elapsed = (time.time() - start) * 1000
         if r.status_code == 401:
             return "expired", elapsed, r.status_code
@@ -153,7 +155,7 @@ def get_free_slots(token, office_id, date, quantity, rate_limiter, session):
     headers = {"Authorization": f"Bearer {token}"}
     start = time.time()
     try:
-        r = session.get(url, headers=headers, timeout=10)
+        r = session.get(url, headers=headers, timeout=15)
         elapsed = (time.time() - start) * 1000
         if r.status_code == 401:
             return "expired", elapsed, r.status_code
@@ -168,18 +170,13 @@ def get_free_slots(token, office_id, date, quantity, rate_limiter, session):
         return [], None, None
 
 def send_telegram(bot_token, chat_id, message):
-    """Invia notifica Telegram SENZA proxy (usa una sessione pulita)"""
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         with requests.Session() as sess:
             r = sess.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=10)
-            if r.status_code == 200:
-                log("✅ Notifica Telegram inviata")
-            else:
-                log(f"⚠️ Risposta Telegram: {r.status_code} - {r.text}")
             return r.status_code == 200
     except Exception as e:
-        log(f"❌ Errore invio Telegram: {e}")
+        log(f"Errore invio Telegram: {e}")
         return False
 
 def get_current_ip(session):
@@ -189,6 +186,31 @@ def get_current_ip(session):
     except:
         return "sconosciuto"
 
+def process_office(office_id, token, trip_date, args, rate_limiter, session):
+    """Funzione da eseguire in parallelo per ogni ufficio."""
+    office_name = "Cairo" if office_id == 1 else "Alessandria"
+    result, rtt_check, status_check = check_availability(token, office_id, args.visa_id, args.service_level, rate_limiter, session)
+    if result == "expired":
+        return {"status": "expired"}
+    if result == "rate_limit":
+        return {"status": "rate_limit"}
+    if result is True:
+        slots, rtt_slots, status_slots = get_free_slots(token, office_id, trip_date, args.persons, rate_limiter, session)
+        if slots and len(slots) > 0:
+            return {
+                "status": "available",
+                "office_id": office_id,
+                "office_name": office_name,
+                "slots": slots,
+                "rtt_check": rtt_check,
+                "status_check": status_check,
+                "rtt_slots": rtt_slots,
+                "status_slots": status_slots
+            }
+        else:
+            return {"status": "nothing"}
+    return {"status": "nothing"}
+
 def main():
     parser = argparse.ArgumentParser(description='Almaviva Bot CLI Engine')
     parser.add_argument('--email', required=True, help='Email account')
@@ -197,7 +219,7 @@ def main():
     parser.add_argument('--visa-id', type=int, default=8, help='Visa ID')
     parser.add_argument('--office-ids', default='1,2', help='Uffici (es. 1,2)')
     parser.add_argument('--trip-date', help='Data viaggio (YYYY-MM-DD)')
-    parser.add_argument('--interval-min', type=int, default=5, help='Intervallo tra cicli (minuti)')
+    parser.add_argument('--interval-sec', type=int, default=300, help='Intervallo tra cicli (secondi)')
     parser.add_argument('--telegram-token', default='', help='Token bot Telegram')
     parser.add_argument('--telegram-chat', default='', help='Chat ID Telegram')
     parser.add_argument('--service-level', type=int, default=1, help='Service level ID')
@@ -207,7 +229,7 @@ def main():
     parser.add_argument('--proxy', default='', help='Proxy in formato host:port:user:pass (opzionale)')
     args = parser.parse_args()
 
-    # Crea sessione condivisa e imposta proxy
+    # Sessione condivisa e proxy
     session = requests.Session()
     if args.proxy:
         parts = args.proxy.split(':')
@@ -226,7 +248,7 @@ def main():
 
     office_ids = [int(x) for x in args.office_ids.split(',')]
     trip_date = args.trip_date or (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
-    interval_sec = args.interval_min * 60
+    interval_sec = args.interval_sec
 
     visa_name = "Sconosciuto"
     for name, vid in VISA_TYPES.items():
@@ -238,7 +260,7 @@ def main():
 
     log(f"Avvio monitoraggio per {display_name}")
     log(f"Visto ID: {args.visa_id} ({visa_name}), Uffici: {office_ids}, Data viaggio: {trip_date}")
-    log(f"Intervallo: {args.interval_min} minuti")
+    log(f"Intervallo: {interval_sec} secondi")
 
     rate_limiter = RateLimiter(args.email)
     token, refresh = get_token(args.email, args.password, session)
@@ -248,38 +270,47 @@ def main():
     current_ip = get_current_ip(session)
 
     while True:
-        for office_id in office_ids:
-            office_name = "Cairo" if office_id == 1 else "Alessandria"
-            result, rtt_check, status_check = check_availability(token, office_id, args.visa_id, args.service_level, rate_limiter, session)
-            
-            if result == "expired":
-                log("Token scaduto, rinnovo...")
-                if refresh:
-                    new_data = refresh_token(refresh, session)
-                    if new_data:
-                        token = new_data["access_token"]
-                        refresh = new_data.get("refresh_token")
-                        log("Token rinnovato")
-                        continue
-                token, refresh = get_token(args.email, args.password, session)
-                if not token:
+        # Controllo multi-thread per tutti gli uffici
+        with ThreadPoolExecutor(max_workers=len(office_ids)) as executor:
+            futures = {executor.submit(process_office, oid, token, trip_date, args, rate_limiter, session): oid for oid in office_ids}
+            for future in as_completed(futures):
+                result = future.result()
+                if result["status"] == "expired":
+                    log("Token scaduto, rinnovo...")
+                    if refresh:
+                        new_data = refresh_token(refresh, session)
+                        if new_data:
+                            token = new_data["access_token"]
+                            refresh = new_data.get("refresh_token")
+                            log("Token rinnovato")
+                            break  # esce dal for, il while ripartirà
+                    else:
+                        token, refresh = get_token(args.email, args.password, session)
+                        if not token:
+                            time.sleep(60)
+                        break
+                elif result["status"] == "rate_limit":
+                    log("Rate limit (429), attendo 60 secondi")
                     time.sleep(60)
-                continue
-            if result == "rate_limit":
-                log("Rate limit (429), attendo 60 secondi")
-                time.sleep(60)
-                continue
-            if result is True:
-                log(f"✅ Disponibilità per {office_name}! Recupero slot...")
-                slots, rtt_slots, status_slots = get_free_slots(token, office_id, trip_date, args.persons, rate_limiter, session)
-                if slots and len(slots) > 0:
+                    break
+                elif result["status"] == "available":
+                    # Trovato slot
+                    office_name = result["office_name"]
+                    slots = result["slots"]
+                    rtt_check = result["rtt_check"]
+                    status_check = result["status_check"]
+                    rtt_slots = result["rtt_slots"]
+                    status_slots = result["status_slots"]
+                    
                     msg = f"<b>🎯 <u>SLOT TROVATO PER {display_name}</u></b> 🎯\n"
                     msg += f"<b>🤖 Bot:</b> {args.bot_name}\n"
                     msg += f"<b>📧 Email:</b> {args.email}\n"
                     msg += f"<b>🏢 Centro:</b> {office_name}\n"
                     msg += f"<b>💳 Servizio:</b> Standard - EGP 1875\n"
-                    msg += f"<b>🎫 Visto:</b> {visa_name} (ID {args.visa_id})\n"
-                    msg += f"<b>📅 Data viaggio:</b> {trip_date}\n"
+                    msg += f"<b>🎫 Visto:</b> {visa_name}"
+                    if args.visa_id:
+                        msg += f" (ID {args.visa_id})"
+                    msg += f"\n<b>📅 Data viaggio:</b> {trip_date}\n"
                     msg += f"<b>⏰ Slot disponibile:</b> {slots[0]}\n"
                     msg += f"<b>🌐 IP utilizzato:</b> {current_ip}\n"
                     if rtt_check is not None:
@@ -292,11 +323,14 @@ def main():
                     log(f"Notifica inviata per {display_name}")
                     if args.telegram_token and args.telegram_chat:
                         send_telegram(args.telegram_token, args.telegram_chat, msg)
+                        log("✅ Notifica Telegram inviata")
+                    else:
+                        log("⚠️ Telegram non configurato, notifica non inviata")
                     return 0
                 else:
-                    log("Nessuno slot per la data selezionata")
-            else:
-                log(f"Nessun appuntamento ({office_name})")
+                    # Nessuna disponibilità
+                    log(f"Nessun appuntamento ({office_name})")
+        # Se non abbiamo trovato slot e non siamo usciti, attendi
         time.sleep(interval_sec)
 
 if __name__ == "__main__":

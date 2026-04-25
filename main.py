@@ -8,7 +8,7 @@ import sys
 import os
 import json
 from datetime import datetime
-from constants import VISA_TYPES, OFFICES, DEFAULT_CHECK_INTERVAL_MIN
+from constants import VISA_TYPES, OFFICES, DEFAULT_CHECK_INTERVAL_SEC
 from config import load_config, save_config
 
 ctk.set_appearance_mode("dark")
@@ -29,7 +29,7 @@ class BotProcess:
         visa_id = VISA_TYPES.get(visa_name, 8)
         office_ids = [1, 2] if self.account.get("all_offices", True) else [OFFICES.get(self.account.get("office_id", "Cairo"), 1)]
         trip_date = self.account.get("trip_date", "")
-        interval_min = self.settings.get("check_interval_min", DEFAULT_CHECK_INTERVAL_MIN)
+        interval_sec = self.settings.get("check_interval_sec", DEFAULT_CHECK_INTERVAL_SEC)
         tg_token = self.settings.get("telegram_bot_token", "")
         tg_chat = self.settings.get("telegram_chat_id", "")
         service_level = int(self.account.get("service_level_id", 1))
@@ -38,7 +38,7 @@ class BotProcess:
         password = self.account["password"]
         account_name = self.account.get("name", email)
 
-        # Determina il proxy: se l'account ha un proxy, usalo; altrimenti usa quello globale
+        # Proxy: specifico dell'account o globale
         account_proxy = self.account.get("proxy", "").strip()
         global_proxy_enabled = self.settings.get("proxy_enabled", False)
         global_proxy_list = self.settings.get("proxy_list", [])
@@ -56,7 +56,7 @@ class BotProcess:
             "--account-name", account_name,
             "--visa-id", str(visa_id),
             "--office-ids", ",".join(str(o) for o in office_ids),
-            "--interval-min", str(interval_min),
+            "--interval-sec", str(interval_sec),
             "--service-level", str(service_level),
             "--persons", str(persons),
             "--bot-name", "IBRA TECH BOT"
@@ -112,7 +112,6 @@ class App(ctk.CTk):
         self.grid_columnconfigure(1, weight=1)  # right panel
         self.grid_rowconfigure(0, weight=1)
 
-        # LEFT PANEL - IMPOSTAZIONI (scrollabile)
         left_frame = ctk.CTkFrame(self, width=380)
         left_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         left_frame.grid_propagate(False)
@@ -142,7 +141,7 @@ class App(ctk.CTk):
         global_frame.pack(fill="x", pady=10)
         ctk.CTkLabel(global_frame, text="IMPOSTAZIONI GLOBALI", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(5,0))
 
-        ctk.CTkLabel(global_frame, text="Intervallo di controllo (minuti)").pack(anchor="w", padx=10)
+        ctk.CTkLabel(global_frame, text="Intervallo di controllo (secondi)").pack(anchor="w", padx=10)
         self.interval = ctk.CTkEntry(global_frame, width=120)
         self.interval.pack(anchor="w", padx=10, pady=2)
 
@@ -227,7 +226,7 @@ class App(ctk.CTk):
     def delete_account(self):
         selected = [name for name, var in self.account_checkboxes.items() if var.get()]
         if not selected:
-            msgbox.showerror("Errore", "Seleziona almeno un account")
+            msgbox.showerror("Ergo", "Seleziona almeno un account")
             return
         for name in selected:
             self.config["accounts"] = [a for a in self.config["accounts"] if a.get("name") != name]
@@ -342,7 +341,7 @@ class App(ctk.CTk):
 
     # ==================== SALVATAGGIO IMPOSTAZIONI ====================
     def save_global_settings(self):
-        self.config["settings"]["check_interval_min"] = int(self.interval.get())
+        self.config["settings"]["check_interval_sec"] = int(self.interval.get())
         self.config["settings"]["telegram_bot_token"] = self.tg_token.get()
         self.config["settings"]["telegram_chat_id"] = self.tg_chat.get()
         save_config(self.config)
@@ -366,7 +365,7 @@ class App(ctk.CTk):
 
     def _load_settings_into_ui(self):
         settings = self.config["settings"]
-        self.interval.insert(0, str(settings.get("check_interval_min", DEFAULT_CHECK_INTERVAL_MIN)))
+        self.interval.insert(0, str(settings.get("check_interval_sec", DEFAULT_CHECK_INTERVAL_SEC)))
         self.tg_token.insert(0, settings.get("telegram_bot_token", ""))
         self.tg_chat.insert(0, settings.get("telegram_chat_id", ""))
         proxy_list = settings.get("proxy_list", [])
@@ -394,7 +393,7 @@ class App(ctk.CTk):
             if not acc:
                 continue
             settings = self.config["settings"].copy()
-            settings["check_interval_min"] = int(self.interval.get())
+            settings["check_interval_sec"] = int(self.interval.get())
             settings["telegram_bot_token"] = self.tg_token.get()
             settings["telegram_chat_id"] = self.tg_chat.get()
             proc = BotProcess(acc, settings, self._log)

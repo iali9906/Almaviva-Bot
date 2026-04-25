@@ -25,12 +25,12 @@ FREE_SLOTS_URL = "https://egyapi.almaviva-visa.it/reservation-manager/api/slots/
 # Parametri client per il login OAuth2
 CLIENT_ID = "aa-visasys-public"
 
-# Limiti e temporizzazioni
-DEFAULT_CHECK_INTERVAL_MIN = 5
+# Temporizzazioni (valori in secondi)
+DEFAULT_CHECK_INTERVAL_SEC = 300     # 5 minuti
 REQUEST_DELAY_SECONDS = 30
 MAX_RETRIES = 3
 BASE_BACKOFF_SECONDS = 60
 
-# Orario di ufficio (disabilitato nel codice)
+# Orario di ufficio (disabilitato)
 OFFICE_HOURS_START = 9
 OFFICE_HOURS_END = 16
