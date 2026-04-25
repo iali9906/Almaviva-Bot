@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Almaviva Bot - CLI Engine
-Monitoraggio appuntamenti per singolo account con gestione automatica limiti.
-Supporto proxy e parallelizzazione degli uffici.
+Monitoraggio appuntamenti per singolo account con gestione limiti e parallelizzazione.
 """
 import argparse
 import sys
@@ -22,7 +21,6 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 class RateLimiter:
-    # ... (identico a prima, invariato) ...
     def __init__(self, email, session_limit=28, daily_limit=70):
         self.email = email
         self.session_limit = session_limit
@@ -187,7 +185,6 @@ def get_current_ip(session):
         return "sconosciuto"
 
 def process_office(office_id, token, trip_date, args, rate_limiter, session):
-    """Funzione da eseguire in parallelo per ogni ufficio."""
     office_name = "Cairo" if office_id == 1 else "Alessandria"
     result, rtt_check, status_check = check_availability(token, office_id, args.visa_id, args.service_level, rate_limiter, session)
     if result == "expired":
@@ -199,7 +196,6 @@ def process_office(office_id, token, trip_date, args, rate_limiter, session):
         if slots and len(slots) > 0:
             return {
                 "status": "available",
-                "office_id": office_id,
                 "office_name": office_name,
                 "slots": slots,
                 "rtt_check": rtt_check,
@@ -229,7 +225,6 @@ def main():
     parser.add_argument('--proxy', default='', help='Proxy in formato host:port:user:pass (opzionale)')
     args = parser.parse_args()
 
-    # Sessione condivisa e proxy
     session = requests.Session()
     if args.proxy:
         parts = args.proxy.split(':')
@@ -270,7 +265,6 @@ def main():
     current_ip = get_current_ip(session)
 
     while True:
-        # Controllo multi-thread per tutti gli uffici
         with ThreadPoolExecutor(max_workers=len(office_ids)) as executor:
             futures = {executor.submit(process_office, oid, token, trip_date, args, rate_limiter, session): oid for oid in office_ids}
             for future in as_completed(futures):
@@ -283,7 +277,7 @@ def main():
                             token = new_data["access_token"]
                             refresh = new_data.get("refresh_token")
                             log("Token rinnovato")
-                            break  # esce dal for, il while ripartirà
+                            break
                     else:
                         token, refresh = get_token(args.email, args.password, session)
                         if not token:
@@ -294,14 +288,13 @@ def main():
                     time.sleep(60)
                     break
                 elif result["status"] == "available":
-                    # Trovato slot
                     office_name = result["office_name"]
                     slots = result["slots"]
                     rtt_check = result["rtt_check"]
                     status_check = result["status_check"]
                     rtt_slots = result["rtt_slots"]
                     status_slots = result["status_slots"]
-                    
+
                     msg = f"<b>🎯 <u>SLOT TROVATO PER {display_name}</u></b> 🎯\n"
                     msg += f"<b>🤖 Bot:</b> {args.bot_name}\n"
                     msg += f"<b>📧 Email:</b> {args.email}\n"
@@ -327,10 +320,6 @@ def main():
                     else:
                         log("⚠️ Telegram non configurato, notifica non inviata")
                     return 0
-                else:
-                    # Nessuna disponibilità
-                    log(f"Nessun appuntamento ({office_name})")
-        # Se non abbiamo trovato slot e non siamo usciti, attendi
         time.sleep(interval_sec)
 
 if __name__ == "__main__":

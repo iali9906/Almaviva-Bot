@@ -74,12 +74,13 @@ class BotProcess:
         self.log_callback(f"🚀 Avviato monitoraggio per {account_name} (PID {self.process.pid})")
 
     def _read_output(self):
+        account_name = self.account.get('name', self.account['email'])
         for line in iter(self.process.stdout.readline, ''):
             if line:
-                self.log_callback(line.strip())
+                self.log_callback(f"[{account_name}] {line.strip()}")
         self.process.wait()
         self.running = False
-        self.log_callback(f"🛑 Monitoraggio terminato per {self.account.get('name', self.account['email'])}")
+        self.log_callback(f"🛑 Monitoraggio terminato per {account_name}")
 
     def stop(self):
         if self.process and self.running:
@@ -226,7 +227,7 @@ class App(ctk.CTk):
     def delete_account(self):
         selected = [name for name, var in self.account_checkboxes.items() if var.get()]
         if not selected:
-            msgbox.showerror("Ergo", "Seleziona almeno un account")
+            msgbox.showerror("Errore", "Seleziona almeno un account")
             return
         for name in selected:
             self.config["accounts"] = [a for a in self.config["accounts"] if a.get("name") != name]
