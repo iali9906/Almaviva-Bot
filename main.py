@@ -36,18 +36,19 @@ class BotProcess:
         persons = int(self.account.get("persons", 1)) if self.account.get("persons") else 1
         email = self.account["email"]
         password = self.account["password"]
+        account_name = self.account.get("name", email)
 
         cmd = [
             sys.executable, "bot_cli.py",
             "--email", email,
             "--password", password,
-            "--account-name", self.account.get("name", ""),
+            "--account-name", account_name,
             "--visa-id", str(visa_id),
             "--office-ids", ",".join(str(o) for o in office_ids),
             "--interval-min", str(interval_min),
             "--service-level", str(service_level),
             "--persons", str(persons),
-            "--bot-name", "IBRA TECH Bot Controller"
+            "--bot-name", "IBRA TECH BOT"
         ]
         if trip_date:
             cmd.extend(["--trip-date", trip_date])
@@ -57,7 +58,7 @@ class BotProcess:
         self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         self.running = True
         threading.Thread(target=self._read_output, daemon=True).start()
-        self.log_callback(f"🚀 Avviato monitoraggio per {self.account['name']} (PID {self.process.pid})")
+        self.log_callback(f"🚀 Avviato monitoraggio per {account_name} (PID {self.process.pid})")
 
     def _read_output(self):
         for line in iter(self.process.stdout.readline, ''):
@@ -65,7 +66,7 @@ class BotProcess:
                 self.log_callback(line.strip())
         self.process.wait()
         self.running = False
-        self.log_callback(f"🛑 Monitoraggio terminato per {self.account['name']}")
+        self.log_callback(f"🛑 Monitoraggio terminato per {self.account.get('name', self.account['email'])}")
 
     def stop(self):
         if self.process and self.running:
@@ -75,33 +76,18 @@ class BotProcess:
             except subprocess.TimeoutExpired:
                 self.process.kill()
             self.running = False
-            self.log_callback(f"🛑 Monitoraggio fermato per {self.account['name']}")
+            self.log_callback(f"🛑 Monitoraggio fermato per {self.account.get('name', self.account['email'])}")
 
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Almaviva Bot Controller")
-        self.geometry("1200x800")
+        self.title("IBRA TECH BOT Controller")
+        self.geometry("1300x800")
+        self.minsize(1000, 600)
         self.config = load_config()
         self.processes = {}
         self._create_widgets()
-        self._populate_proxy_fields_from_config()
-
-    def _populate_proxy_fields_from_config(self):
-        proxy_list = self.config["settings"].get("proxy_list", [])
-        if proxy_list:
-            first_proxy = proxy_list[0]
-            parts = first_proxy.split(':')
-            if len(parts) >= 2:
-                self.proxy_host.delete(0, 'end')
-                self.proxy_host.insert(0, parts[0])
-                self.proxy_port.delete(0, 'end')
-                self.proxy_port.insert(0, parts[1])
-                if len(parts) >= 4:
-                    self.proxy_user.delete(0, 'end')
-                    self.proxy_user.insert(0, parts[2])
-                    self.proxy_pass.delete(0, 'end')
-                    self.proxy_pass.insert(0, parts[3])
+        self._load_settings_into_ui()
 
     def _log(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -109,64 +95,104 @@ class App(ctk.CTk):
         self.log_text.see("end")
 
     def _create_widgets(self):
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_columnconfigure(1, weight=2)
+        # Layout a due colonne: sinistra impostazioni, destra account+log
+        self.grid_columnconfigure(0, weight=0)  # left panel (impostazioni) - fisso
+        self.grid_columnconfigure(1, weight=1)  # right panel
         self.grid_rowconfigure(0, weight=1)
 
-        left = ctk.CTkFrame(self)
-        left.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        # LEFT PANEL - IMPOSTAZIONI (scrollabile)
+        left_frame = ctk.CTkFrame(self, width=380)
+        left_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        left_frame.grid_propagate(False)
 
-        ctk.CTkLabel(left, text="ACCOUNT", font=("Arial",16,"bold")).pack(pady=(10,5))
-        self.account_frame = ctk.CTkScrollableFrame(left, width=300, height=200)
-        self.account_frame.pack(pady=5, fill="both", expand=True)
+        # Scroll interno per le impostazioni
+        settings_scroll = ctk.CTkScrollableFrame(left_frame, height=700)
+        settings_scroll.pack(fill="both", expand=True)
+
+        # Logo (testuale, senza Pillow)
+        logo_label = ctk.CTkLabel(settings_scroll, text="🤖 IBRA TECH BOT", font=("Arial", 20, "bold"))
+        logo_label.pack(pady=(10,15))
+
+        # --- PROXY SECTION ---
+        proxy_frame = ctk.CTkFrame(settings_scroll)
+        proxy_frame.pack(fill="x", pady=10)
+        ctk.CTkLabel(proxy_frame, text="PROXY (OPZIONALE)", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(5,0))
+        self.proxy_host = ctk.CTkEntry(proxy_frame, placeholder_text="Host (es. proxy.smartproxy.net)")
+        self.proxy_host.pack(fill="x", padx=10, pady=2)
+        self.proxy_port = ctk.CTkEntry(proxy_frame, placeholder_text="Porta")
+        self.proxy_port.pack(fill="x", padx=10, pady=2)
+        self.proxy_user = ctk.CTkEntry(proxy_frame, placeholder_text="Username (opzionale)")
+        self.proxy_user.pack(fill="x", padx=10, pady=2)
+        self.proxy_pass = ctk.CTkEntry(proxy_frame, placeholder_text="Password (opzionale)", show="*")
+        self.proxy_pass.pack(fill="x", padx=10, pady=2)
+        ctk.CTkButton(proxy_frame, text="💾 Salva proxy", command=self.save_proxy_settings).pack(pady=5)
+
+        # --- GLOBAL SETTINGS ---
+        global_frame = ctk.CTkFrame(settings_scroll)
+        global_frame.pack(fill="x", pady=10)
+        ctk.CTkLabel(global_frame, text="IMPOSTAZIONI GLOBALI", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(5,0))
+
+        ctk.CTkLabel(global_frame, text="Intervallo di controllo (minuti)").pack(anchor="w", padx=10)
+        self.interval = ctk.CTkEntry(global_frame, width=120)
+        self.interval.pack(anchor="w", padx=10, pady=2)
+
+        ctk.CTkLabel(global_frame, text="Telegram Bot Token").pack(anchor="w", padx=10)
+        self.tg_token = ctk.CTkEntry(global_frame, width=300)
+        self.tg_token.pack(anchor="w", padx=10, pady=2)
+
+        ctk.CTkLabel(global_frame, text="Telegram Chat ID").pack(anchor="w", padx=10)
+        self.tg_chat = ctk.CTkEntry(global_frame, width=300)
+        self.tg_chat.pack(anchor="w", padx=10, pady=2)
+
+        ctk.CTkButton(global_frame, text="💾 Salva impostazioni globali", command=self.save_global_settings).pack(pady=10)
+
+        # Footer nel left panel
+        footer_left = ctk.CTkLabel(settings_scroll, text="© 2019-2026 • IBRA TECH", font=("Arial", 9))
+        footer_left.pack(pady=(15,5))
+
+        # RIGHT PANEL - ACCOUNT + LOG
+        right_frame = ctk.CTkFrame(self)
+        right_frame.grid(row=0, column=1, sticky="nsew", padx=(0,10), pady=10)
+        right_frame.grid_rowconfigure(0, weight=0)  # account list
+        right_frame.grid_rowconfigure(1, weight=1)  # log
+        right_frame.grid_columnconfigure(0, weight=1)
+
+        # --- ACCOUNT SECTION (scrollabile)
+        account_container = ctk.CTkFrame(right_frame)
+        account_container.grid(row=0, column=0, sticky="nsew", pady=(0,10))
+        account_container.grid_rowconfigure(0, weight=1)
+        account_container.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(account_container, text="ACCOUNT", font=("Arial", 16, "bold")).pack(anchor="w", padx=10, pady=(5,0))
+
+        self.account_frame = ctk.CTkScrollableFrame(account_container, height=250)
+        self.account_frame.pack(fill="both", expand=True, padx=10, pady=5)
         self.account_checkboxes = {}
         self.refresh_account_list()
 
-        btn_frame = ctk.CTkFrame(left)
-        btn_frame.pack(pady=5)
-        ctk.CTkButton(btn_frame, text="Nuovo", width=60, command=self.add_account).pack(side="left", padx=2)
-        ctk.CTkButton(btn_frame, text="Modifica", width=60, command=self.edit_account).pack(side="left", padx=2)
-        ctk.CTkButton(btn_frame, text="Elimina", width=60, command=self.delete_account).pack(side="left", padx=2)
-        ctk.CTkButton(btn_frame, text="Avvia selezionati", fg_color="green", width=120, command=self.start_selected).pack(side="left", padx=2)
-        ctk.CTkButton(btn_frame, text="Ferma selezionati", fg_color="red", width=120, command=self.stop_selected).pack(side="left", padx=2)
-        ctk.CTkButton(btn_frame, text="Ferma tutti", fg_color="darkred", width=100, command=self.stop_all).pack(side="left", padx=2)
+        # Pulsanti sotto la lista account
+        btn_frame = ctk.CTkFrame(account_container)
+        btn_frame.pack(fill="x", padx=10, pady=5)
+        ctk.CTkButton(btn_frame, text="➕ Nuovo", width=80, command=self.add_account).pack(side="left", padx=2)
+        ctk.CTkButton(btn_frame, text="✏️ Modifica", width=80, command=self.edit_account).pack(side="left", padx=2)
+        ctk.CTkButton(btn_frame, text="🗑️ Elimina", width=80, command=self.delete_account).pack(side="left", padx=2)
 
-        ctk.CTkLabel(left, text="PROXY (OPZIONALE)", font=("Arial",14,"bold")).pack(pady=(15,5))
-        self.proxy_enabled = ctk.BooleanVar(value=self.config["settings"].get("proxy_enabled", False))
-        ctk.CTkCheckBox(left, text="Abilita proxy", variable=self.proxy_enabled).pack(anchor="w", padx=20)
-        self.proxy_host = ctk.CTkEntry(left, width=250)
-        self.proxy_host.pack(pady=2, padx=20)
-        self.proxy_port = ctk.CTkEntry(left, width=250)
-        self.proxy_port.pack(pady=2, padx=20)
-        self.proxy_user = ctk.CTkEntry(left, width=250)
-        self.proxy_user.pack(pady=2, padx=20)
-        self.proxy_pass = ctk.CTkEntry(left, width=250, show="*")
-        self.proxy_pass.pack(pady=2, padx=20)
-        ctk.CTkButton(left, text="Salva proxy", command=self.save_proxy_settings).pack(pady=5)
+        action_frame = ctk.CTkFrame(account_container)
+        action_frame.pack(fill="x", padx=10, pady=5)
+        ctk.CTkButton(action_frame, text="▶ Avvia selezionati", fg_color="green", command=self.start_selected).pack(side="left", padx=2, expand=True, fill="x")
+        ctk.CTkButton(action_frame, text="⏹ Ferma selezionati", fg_color="red", command=self.stop_selected).pack(side="left", padx=2, expand=True, fill="x")
+        ctk.CTkButton(action_frame, text="⏸ Ferma tutti", fg_color="darkred", command=self.stop_all).pack(side="left", padx=2, expand=True, fill="x")
 
-        ctk.CTkLabel(left, text="IMPOSTAZIONI", font=("Arial",14,"bold")).pack(pady=(15,5))
-        self.interval = ctk.CTkEntry(left, width=100)
-        self.interval.insert(0, str(self.config["settings"].get("check_interval_min", DEFAULT_CHECK_INTERVAL_MIN)))
-        ctk.CTkLabel(left, text="Intervallo (minuti)").pack(anchor="w", padx=20)
-        self.interval.pack(anchor="w", padx=20)
+        # --- LOG AREA ---
+        log_frame = ctk.CTkFrame(right_frame)
+        log_frame.grid(row=1, column=0, sticky="nsew")
+        log_frame.grid_rowconfigure(0, weight=1)
+        log_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(log_frame, text="LOG", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(5,0))
+        self.log_text = ctk.CTkTextbox(log_frame)
+        self.log_text.pack(fill="both", expand=True, padx=10, pady=5)
 
-        self.tg_token = ctk.CTkEntry(left, width=250)
-        self.tg_token.insert(0, self.config["settings"].get("telegram_bot_token", ""))
-        ctk.CTkLabel(left, text="Telegram Bot Token").pack(anchor="w", padx=20)
-        self.tg_token.pack(pady=2, padx=20)
-        self.tg_chat = ctk.CTkEntry(left, width=250)
-        self.tg_chat.insert(0, self.config["settings"].get("telegram_chat_id", ""))
-        ctk.CTkLabel(left, text="Telegram Chat ID").pack(anchor="w", padx=20)
-        self.tg_chat.pack(pady=2, padx=20)
-
-        ctk.CTkButton(left, text="Salva impostazioni globali", command=self.save_global_settings).pack(pady=10)
-
-        right = ctk.CTkFrame(self)
-        right.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
-        ctk.CTkLabel(right, text="LOG", font=("Arial",16,"bold")).pack(pady=5)
-        self.log_text = ctk.CTkTextbox(right, height=600)
-        self.log_text.pack(fill="both", expand=True, padx=10, pady=10)
-
+    # ---------- METODI PER ACCOUNT ----------
     def refresh_account_list(self):
         for widget in self.account_frame.winfo_children():
             widget.destroy()
@@ -205,9 +231,12 @@ class App(ctk.CTk):
 
     def open_account_editor(self, account=None):
         editor = ctk.CTkToplevel(self)
-        editor.title("Account Editor")
-        editor.geometry("700x600")
-        scroll_frame = ctk.CTkScrollableFrame(editor, width=680, height=550)
+        editor.title("Modifica Account")
+        editor.geometry("750x700")
+        editor.grab_set()
+        editor.transient(self)
+        editor.focus_force()
+        scroll_frame = ctk.CTkScrollableFrame(editor, width=700, height=600)
         scroll_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
         entries = {}
@@ -302,8 +331,9 @@ class App(ctk.CTk):
             self.refresh_account_list()
             editor.destroy()
 
-        ctk.CTkButton(scroll_frame, text="Salva", command=save).grid(row=row, column=0, columnspan=2, pady=20)
+        ctk.CTkButton(scroll_frame, text="💾 Salva", command=save).grid(row=row, column=0, columnspan=2, pady=20)
 
+    # ---------- SALVATAGGIO IMPOSTAZIONI ----------
     def save_global_settings(self):
         self.config["settings"]["check_interval_min"] = int(self.interval.get())
         self.config["settings"]["telegram_bot_token"] = self.tg_token.get()
@@ -321,10 +351,27 @@ class App(ctk.CTk):
             if user and pwd:
                 proxy_str += f":{user}:{pwd}"
             self.config["settings"]["proxy_list"] = [proxy_str]
-        self.config["settings"]["proxy_enabled"] = self.proxy_enabled.get()
+        self.config["settings"]["proxy_enabled"] = bool(host and port)
         save_config(self.config)
         msgbox.showinfo("Info", "Impostazioni proxy salvate")
 
+    def _load_settings_into_ui(self):
+        settings = self.config["settings"]
+        self.interval.insert(0, str(settings.get("check_interval_min", DEFAULT_CHECK_INTERVAL_MIN)))
+        self.tg_token.insert(0, settings.get("telegram_bot_token", ""))
+        self.tg_chat.insert(0, settings.get("telegram_chat_id", ""))
+        proxy_list = settings.get("proxy_list", [])
+        if proxy_list:
+            first_proxy = proxy_list[0]
+            parts = first_proxy.split(':')
+            if len(parts) >= 2:
+                self.proxy_host.insert(0, parts[0])
+                self.proxy_port.insert(0, parts[1])
+                if len(parts) >= 4:
+                    self.proxy_user.insert(0, parts[2])
+                    self.proxy_pass.insert(0, parts[3])
+
+    # ---------- AVVIO E FERMA ----------
     def start_selected(self):
         selected = [name for name, var in self.account_checkboxes.items() if var.get()]
         if not selected:
