@@ -1,161 +1,116 @@
 #!/usr/bin/env python3
 """
-Almaviva Bot - CLI Interface
-Monitoraggio appuntamenti da riga di comando.
-LEGGE TUTTI I DATI dal file almaviva_config.json
-Invia notifiche Telegram quando trova un appuntamento.
+Almaviva Bot - CLI Engine
+Monitoraggio appuntamenti per singolo account con gestione automatica limiti.
 """
-import requests
+import argparse
+import sys
 import time
 import json
 import os
 from datetime import datetime, timedelta
+import requests
+
 from constants import AUTH_TOKEN_URL, CLIENT_ID, CHECKS_URL, FREE_SLOTS_URL
+from utils import wait_seconds
 
-# ==================== CARICA CONFIGURAZIONE COMPLETA ====================
-CONFIG_FILE = "almaviva_config.json"
+COUNTERS_FILE = "request_counters.json"
 
-def load_config_from_file():
-    """Carica l'intero file di configurazione"""
-    if not os.path.exists(CONFIG_FILE):
-        print(f"❌ Errore: File {CONFIG_FILE} non trovato")
-        return None
-    
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            config = json.load(f)
-        return config
-    except json.JSONDecodeError:
-        print(f"❌ Errore: File {CONFIG_FILE} non è un JSON valido")
-        return None
-    except Exception as e:
-        print(f"❌ Errore durante il caricamento della configurazione: {e}")
-        return None
+def log(msg):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-def load_first_account(config):
-    """Carica il primo account dal file di configurazione JSON"""
-    if not config:
-        return None, None
-    
-    if not config.get("accounts") or len(config["accounts"]) == 0:
-        print("❌ Errore: Nessun account trovato nel file di configurazione")
-        return None, None
-    
-    account = config["accounts"][0]
-    email = account.get("email")
-    password = account.get("password")
-    
-    if not email or not password:
-        print("❌ Errore: Email o password mancanti per il primo account")
-        return None, None
-    
-    # Estrai anche altri parametri dall'account (se presenti)
-    visa_type = account.get("visa_type", "Study Visa (D)")
-    visa_id = 8  # default Study Visa (D)
-    
-    # Converte il nome del visto in ID usando constants
-    try:
-        from constants import VISA_TYPES
-        visa_id = VISA_TYPES.get(visa_type, 8)
-    except:
-        pass
-    
-    office = account.get("office_id", "Cairo")
-    office_id = 1  # default Cairo
-    try:
-        from constants import OFFICES
-        office_id = OFFICES.get(office, 1)
-    except:
-        pass
-    
-    all_offices = account.get("all_offices", True)
-    service_level_id = int(account.get("service_level_id", 1))
-    trip_date = account.get("trip_date", "")
-    persons = int(account.get("persons", 1)) if account.get("persons") else 1
-    destination = account.get("destination", "")
-    
-    print(f"✅ Caricato account: {email}")
-    print(f"   - Tipo visto: {visa_type} (ID: {visa_id})")
-    print(f"   - Ufficio: {office} (ID: {office_id})")
-    print(f"   - Tutti gli uffici: {all_offices}")
-    print(f"   - Service Level: {service_level_id}")
-    if trip_date:
-        print(f"   - Data viaggio: {trip_date}")
-    if destination:
-        print(f"   - Destinazione: {destination}")
-    if persons > 1:
-        print(f"   - Persone: {persons}")
-    
-    return email, password, visa_id, office_id, service_level_id, trip_date, persons, destination, all_offices
+class RateLimiter:
+    def __init__(self, email, session_limit=28, daily_limit=70):
+        self.email = email
+        self.session_limit = session_limit
+        self.daily_limit = daily_limit
+        self.session_requests = 0
+        self.daily_requests = 0
+        self.session_reset = time.time() + 1800
+        self.daily_reset = time.time() + 86400
+        self._load()
 
-def get_telegram_settings(config):
-    """Estrae token e chat ID di Telegram dalle impostazioni globali"""
-    settings = config.get("settings", {})
-    token = settings.get("telegram_bot_token", "")
-    chat_id = settings.get("telegram_chat_id", "")
-    return token, chat_id
+    def _load(self):
+        if os.path.exists(COUNTERS_FILE):
+            try:
+                with open(COUNTERS_FILE, "r") as f:
+                    data = json.load(f)
+                if data.get("email") == self.email:
+                    self.session_requests = data.get("session_requests", 0)
+                    self.daily_requests = data.get("daily_requests", 0)
+                    self.session_reset = data.get("session_reset", time.time() + 1800)
+                    self.daily_reset = data.get("daily_reset", time.time() + 86400)
+                    log(f"📊 Contatori caricati: sessione {self.session_requests}/{self.session_limit}, giorno {self.daily_requests}/{self.daily_limit}")
+            except:
+                pass
 
-def send_telegram(bot_token, chat_id, message):
-    """Invia un messaggio Telegram"""
-    if not bot_token or not chat_id:
-        return False
-    try:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        r = requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=5)
-        return r.status_code == 200
-    except:
-        return False
+    def _save(self):
+        try:
+            with open(COUNTERS_FILE, "w") as f:
+                json.dump({
+                    "email": self.email,
+                    "session_requests": self.session_requests,
+                    "daily_requests": self.daily_requests,
+                    "session_reset": self.session_reset,
+                    "daily_reset": self.daily_reset
+                }, f)
+        except:
+            pass
 
-# ==================== CARICA CONFIGURAZIONI ====================
-config_data = load_config_from_file()
-if not config_data:
-    print("Impossibile proseguire. Verifica che almaviva_config.json esista e sia valido.")
-    exit(1)
+    def _check_reset(self):
+        now = time.time()
+        if now >= self.session_reset:
+            self.session_requests = 0
+            self.session_reset = now + 1800
+            log("🔄 Reset contatore sessione (30 min)")
+        if now >= self.daily_reset:
+            self.daily_requests = 0
+            self.daily_reset = now + 86400
+            log("🔄 Reset contatore giornaliero")
+        self._save()
 
-EMAIL, PASSWORD, VISA_ID, OFFICE_ID, SERVICE_LEVEL, TRIP_DATE, PERSONS, DESTINATION, ALL_OFFICES = load_first_account(config_data)
+    def wait_if_needed(self):
+        self._check_reset()
+        if self.session_requests >= self.session_limit:
+            wait = self.session_reset - time.time()
+            log(f"⏳ Limite sessione ({self.session_requests}/{self.session_limit}). Attendo {int(wait//60)} minuti.")
+            time.sleep(wait)
+            self.session_requests = 0
+            self._save()
+        if self.daily_requests >= self.daily_limit:
+            wait = self.daily_reset - time.time()
+            log(f"⏳ Limite giornaliero ({self.daily_requests}/{self.daily_limit}). Attendo {int(wait//3600)} ore.")
+            time.sleep(wait)
+            self.daily_requests = 0
+            self._save()
 
-if not EMAIL or not PASSWORD:
-    print("Impossibile proseguire. Verifica che almaviva_config.json contenga un account valido.")
-    exit(1)
+    def increment(self):
+        self.session_requests += 1
+        self.daily_requests += 1
+        self._save()
+        log(f"📊 Richieste: sessione {self.session_requests}/{self.session_limit}, giorno {self.daily_requests}/{self.daily_limit}")
 
-# Carica impostazioni Telegram
-TELEGRAM_TOKEN, TELEGRAM_CHAT = get_telegram_settings(config_data)
-if TELEGRAM_TOKEN and TELEGRAM_CHAT:
-    print("✅ Notifiche Telegram attive")
-else:
-    print("⚠️ Telegram non configurato (token o chat ID mancanti)")
-
-# Imposta la data di viaggio (se non presente, usa tra 30 giorni)
-if not TRIP_DATE:
-    TRIP_DATE = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
-
-# Imposta intervallo dalle impostazioni globali (default 5 minuti)
-CHECK_INTERVAL_SEC = config_data.get("settings", {}).get("check_interval_min", 5) * 60
-
-# ==================== FUNZIONI ====================
-def get_token():
-    """Ottiene il token OAuth2 con grant_type=password"""
+def get_token(email, password):
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     data = {
         "grant_type": "password",
         "client_id": CLIENT_ID,
-        "username": EMAIL,
-        "password": PASSWORD
+        "username": email,
+        "password": password
     }
     try:
         r = requests.post(AUTH_TOKEN_URL, headers=headers, data=data, timeout=30)
         if r.status_code != 200:
-            print(f"[{datetime.now()}] Login fallito: {r.status_code}")
-            return None
+            log(f"❌ Login fallito: {r.status_code}")
+            return None, None
         token_data = r.json()
-        print(f"[{datetime.now()}] Login OK, token ottenuto.")
-        return token_data["access_token"]
+        log("✅ Token ottenuto")
+        return token_data["access_token"], token_data.get("refresh_token")
     except Exception as e:
-        print(f"[{datetime.now()}] Errore login: {e}")
-        return None
+        log(f"❌ Errore login: {e}")
+        return None, None
 
 def refresh_token(refresh_token_value):
-    """Rinnova il token usando il refresh_token"""
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     data = {
         "grant_type": "refresh_token",
@@ -170,7 +125,8 @@ def refresh_token(refresh_token_value):
     except:
         return None
 
-def check_availability(token, office_id, visa_id, service_level):
+def check_availability(token, office_id, visa_id, service_level, rate_limiter):
+    rate_limiter.wait_if_needed()
     url = f"{CHECKS_URL}?officeId={office_id}&visaId={visa_id}&serviceLevelId={service_level}"
     headers = {"Authorization": f"Bearer {token}"}
     try:
@@ -180,12 +136,15 @@ def check_availability(token, office_id, visa_id, service_level):
         if r.status_code == 429:
             return "rate_limit"
         r.raise_for_status()
+        rate_limiter.increment()
         return r.json()
     except Exception as e:
-        print(f"Errore check: {e}")
+        log(f"Errore check: {e}")
+        rate_limiter.increment()
         return False
 
-def get_free_slots(token, office_id, date, quantity=1):
+def get_free_slots(token, office_id, date, quantity, rate_limiter):
+    rate_limiter.wait_if_needed()
     url = f"{FREE_SLOTS_URL}?officeId={office_id}&quantity={quantity}&date={date}&type=WEB"
     headers = {"Authorization": f"Bearer {token}"}
     try:
@@ -195,120 +154,88 @@ def get_free_slots(token, office_id, date, quantity=1):
         if r.status_code == 429:
             return "rate_limit"
         r.raise_for_status()
+        rate_limiter.increment()
         return r.json()
     except Exception as e:
-        print(f"Errore slots: {e}")
+        log(f"Errore slots: {e}")
+        rate_limiter.increment()
         return []
 
-def save_token_cache(token_data):
-    """Salva il token in cache per future sessioni"""
-    cache_file = "token_cache.json"
-    with open(cache_file, "w") as f:
-        json.dump(token_data, f)
-    print(f"Token salvato in cache ({cache_file})")
-
-def load_token_cache():
-    """Carica il token dalla cache se ancora valido"""
-    cache_file = "token_cache.json"
-    if os.path.exists(cache_file):
-        try:
-            with open(cache_file, "r") as f:
-                data = json.load(f)
-            if data.get("expires_at", 0) > time.time() + 60:
-                print(f"Token valido trovato in cache (scade alle {datetime.fromtimestamp(data['expires_at']).strftime('%H:%M:%S')})")
-                return data
-        except:
-            pass
-    return None
+def send_telegram(bot_token, chat_id, message):
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        r = requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=5)
+        return r.status_code == 200
+    except:
+        return False
 
 def main():
-    # Prova a caricare token da cache
-    cached = load_token_cache()
-    if cached:
-        token = cached["access_token"]
-        refresh = cached.get("refresh_token")
-        print(f"Token valido fino a {datetime.fromtimestamp(cached['expires_at'])}")
-    else:
-        token = get_token()
-        refresh = None
-        if not token:
-            print("Impossibile proseguire. Verifica le credenziali.")
-            return
-    
-    print(f"\n{'='*50}")
-    print(f"💰 Account: {EMAIL}")
-    print(f"🎯 Visto ID: {VISA_ID}")
-    print(f"🏢 Ufficio ID: {OFFICE_ID}")
-    print(f"🔄 Intervallo: {CHECK_INTERVAL_SEC // 60} minuti")
-    print(f"📅 Data di riferimento: {TRIP_DATE}")
-    if ALL_OFFICES:
-        print(f"🏢 Controllo: Tutti gli uffici (Cairo e Alessandria)")
-    else:
-        print(f"🏢 Controllo: Solo ufficio {OFFICE_ID}")
-    print(f"{'='*50}\n")
-    
-    print(f"🚀 Inizio monitoraggio... (Ctrl+C per fermare)")
-    
-    # Determina quali uffici controllare
-    office_ids = [1, 2] if ALL_OFFICES else [OFFICE_ID]
-    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--email', required=True)
+    parser.add_argument('--password', required=True)
+    parser.add_argument('--visa-id', type=int, default=8)
+    parser.add_argument('--office-ids', default='1,2')
+    parser.add_argument('--trip-date')
+    parser.add_argument('--interval-min', type=int, default=5)
+    parser.add_argument('--telegram-token', default='')
+    parser.add_argument('--telegram-chat', default='')
+    parser.add_argument('--service-level', type=int, default=1)
+    parser.add_argument('--persons', type=int, default=1)
+    args = parser.parse_args()
+
+    office_ids = [int(x) for x in args.office_ids.split(',')]
+    trip_date = args.trip_date or (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+    interval_sec = args.interval_min * 60
+
+    log(f"Avvio monitoraggio per {args.email}")
+    log(f"Visto ID: {args.visa_id}, Uffici: {office_ids}, Data viaggio: {trip_date}")
+    log(f"Intervallo: {args.interval_min} minuti")
+
+    rate_limiter = RateLimiter(args.email)
+    token, refresh = get_token(args.email, args.password)
+    if not token:
+        return 1
+
     while True:
         for office_id in office_ids:
-            result = check_availability(token, office_id, VISA_ID, SERVICE_LEVEL)
-            
+            result = check_availability(token, office_id, args.visa_id, args.service_level, rate_limiter)
             if result == "expired":
-                print("Token scaduto, rinnovo...")
+                log("Token scaduto, rinnovo...")
                 if refresh:
                     new_data = refresh_token(refresh)
                     if new_data:
                         token = new_data["access_token"]
                         refresh = new_data.get("refresh_token")
-                        new_data["expires_at"] = time.time() + new_data.get("expires_in", 900)
-                        save_token_cache(new_data)
-                        print("Token rinnovato con successo")
+                        log("Token rinnovato")
                         continue
-                token = get_token()
+                token, refresh = get_token(args.email, args.password)
                 if not token:
-                    print("Rinnovo fallito, riprovo tra 60 secondi.")
                     time.sleep(60)
                 continue
-            
             if result == "rate_limit":
-                print("⚠️ Rate limit (429), attendo 60 secondi...")
+                log("Rate limit (429), attendo 60s")
                 time.sleep(60)
                 continue
-            
             if result is True:
                 office_name = "Cairo" if office_id == 1 else "Alessandria"
-                print(f"✅ Disponibilità rilevata per office {office_id} ({office_name})! Recupero slot...")
-                slots = get_free_slots(token, office_id, TRIP_DATE, quantity=PERSONS)
-                if slots == "expired":
-                    continue
-                if slots == "rate_limit":
-                    time.sleep(60)
-                    continue
+                log(f"✅ Disponibilità per {office_name}! Recupero slot...")
+                slots = get_free_slots(token, office_id, trip_date, args.persons, rate_limiter)
                 if slots and len(slots) > 0:
-                    print(f"🎯 Slot trovati per {TRIP_DATE}: {slots}")
-                    msg = f"✅ APPUNTAMENTO TROVATO!\nUfficio: {office_name}\nData: {TRIP_DATE}\nVai su https://egy.almaviva-visa.it"
-                    print(f"🏆 {msg}")
-                    if TELEGRAM_TOKEN and TELEGRAM_CHAT:
-                        if send_telegram(TELEGRAM_TOKEN, TELEGRAM_CHAT, msg):
-                            print("📨 Notifica Telegram inviata con successo")
-                        else:
-                            print("❌ Invio notifica Telegram fallito")
-                    else:
-                        print("⚠️ Telegram non configurato, notifica non inviata")
-                    return
+                    msg = f"✅ APPUNTAMENTO TROVATO!\nUfficio: {office_name}\nData: {trip_date}\nVai su https://egy.almaviva-visa.it"
+                    log(msg)
+                    if args.telegram_token and args.telegram_chat:
+                        send_telegram(args.telegram_token, args.telegram_chat, msg)
+                        log("Notifica Telegram inviata")
+                    return 0
                 else:
-                    print(f"Nessuno slot per la data {TRIP_DATE}, continuo...")
+                    log("Nessuno slot per la data selezionata")
             else:
-                office_name = "Cairo" if office_id == 1 else "Alessandria"
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Nessun appuntamento (office {office_id} - {office_name})")
-        
-        time.sleep(CHECK_INTERVAL_SEC)
+                log(f"Nessun appuntamento ({office_name})")
+        time.sleep(interval_sec)
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main())
     except KeyboardInterrupt:
-        print("\n🛑 Monitoraggio fermato dall'utente")
+        log("Interrotto dall'utente")
+        sys.exit(0)

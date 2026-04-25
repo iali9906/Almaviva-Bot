@@ -5,3 +5,4 @@ token_cache.json
 .env
 .DS_Store
 venv/
+request_counters.json
