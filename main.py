@@ -38,6 +38,17 @@ class BotProcess:
         password = self.account["password"]
         account_name = self.account.get("name", email)
 
+        # Determina il proxy: se l'account ha un proxy, usalo; altrimenti usa quello globale
+        account_proxy = self.account.get("proxy", "").strip()
+        global_proxy_enabled = self.settings.get("proxy_enabled", False)
+        global_proxy_list = self.settings.get("proxy_list", [])
+        if account_proxy:
+            proxy_string = account_proxy
+        elif global_proxy_enabled and global_proxy_list:
+            proxy_string = global_proxy_list[0]
+        else:
+            proxy_string = ""
+
         cmd = [
             sys.executable, "bot_cli.py",
             "--email", email,
@@ -54,6 +65,8 @@ class BotProcess:
             cmd.extend(["--trip-date", trip_date])
         if tg_token and tg_chat:
             cmd.extend(["--telegram-token", tg_token, "--telegram-chat", tg_chat])
+        if proxy_string:
+            cmd.extend(["--proxy", proxy_string])
 
         self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         self.running = True
@@ -95,8 +108,7 @@ class App(ctk.CTk):
         self.log_text.see("end")
 
     def _create_widgets(self):
-        # Layout a due colonne: sinistra impostazioni, destra account+log
-        self.grid_columnconfigure(0, weight=0)  # left panel (impostazioni) - fisso
+        self.grid_columnconfigure(0, weight=0)  # left panel (impostazioni)
         self.grid_columnconfigure(1, weight=1)  # right panel
         self.grid_rowconfigure(0, weight=1)
 
@@ -105,18 +117,16 @@ class App(ctk.CTk):
         left_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         left_frame.grid_propagate(False)
 
-        # Scroll interno per le impostazioni
         settings_scroll = ctk.CTkScrollableFrame(left_frame, height=700)
         settings_scroll.pack(fill="both", expand=True)
 
-        # Logo (testuale, senza Pillow)
         logo_label = ctk.CTkLabel(settings_scroll, text="🤖 IBRA TECH BOT", font=("Arial", 20, "bold"))
         logo_label.pack(pady=(10,15))
 
-        # --- PROXY SECTION ---
+        # --- PROXY GLOBALE ---
         proxy_frame = ctk.CTkFrame(settings_scroll)
         proxy_frame.pack(fill="x", pady=10)
-        ctk.CTkLabel(proxy_frame, text="PROXY (OPZIONALE)", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(5,0))
+        ctk.CTkLabel(proxy_frame, text="PROXY GLOBALE (opzionale)", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(5,0))
         self.proxy_host = ctk.CTkEntry(proxy_frame, placeholder_text="Host (es. proxy.smartproxy.net)")
         self.proxy_host.pack(fill="x", padx=10, pady=2)
         self.proxy_port = ctk.CTkEntry(proxy_frame, placeholder_text="Porta")
@@ -125,9 +135,9 @@ class App(ctk.CTk):
         self.proxy_user.pack(fill="x", padx=10, pady=2)
         self.proxy_pass = ctk.CTkEntry(proxy_frame, placeholder_text="Password (opzionale)", show="*")
         self.proxy_pass.pack(fill="x", padx=10, pady=2)
-        ctk.CTkButton(proxy_frame, text="💾 Salva proxy", command=self.save_proxy_settings).pack(pady=5)
+        ctk.CTkButton(proxy_frame, text="💾 Salva proxy globale", command=self.save_global_proxy).pack(pady=5)
 
-        # --- GLOBAL SETTINGS ---
+        # --- IMPOSTAZIONI GLOBALI ---
         global_frame = ctk.CTkFrame(settings_scroll)
         global_frame.pack(fill="x", pady=10)
         ctk.CTkLabel(global_frame, text="IMPOSTAZIONI GLOBALI", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(5,0))
@@ -146,7 +156,6 @@ class App(ctk.CTk):
 
         ctk.CTkButton(global_frame, text="💾 Salva impostazioni globali", command=self.save_global_settings).pack(pady=10)
 
-        # Footer nel left panel
         footer_left = ctk.CTkLabel(settings_scroll, text="© 2019-2026 • IBRA TECH", font=("Arial", 9))
         footer_left.pack(pady=(15,5))
 
@@ -157,7 +166,6 @@ class App(ctk.CTk):
         right_frame.grid_rowconfigure(1, weight=1)  # log
         right_frame.grid_columnconfigure(0, weight=1)
 
-        # --- ACCOUNT SECTION (scrollabile)
         account_container = ctk.CTkFrame(right_frame)
         account_container.grid(row=0, column=0, sticky="nsew", pady=(0,10))
         account_container.grid_rowconfigure(0, weight=1)
@@ -170,7 +178,6 @@ class App(ctk.CTk):
         self.account_checkboxes = {}
         self.refresh_account_list()
 
-        # Pulsanti sotto la lista account
         btn_frame = ctk.CTkFrame(account_container)
         btn_frame.pack(fill="x", padx=10, pady=5)
         ctk.CTkButton(btn_frame, text="➕ Nuovo", width=80, command=self.add_account).pack(side="left", padx=2)
@@ -183,7 +190,6 @@ class App(ctk.CTk):
         ctk.CTkButton(action_frame, text="⏹ Ferma selezionati", fg_color="red", command=self.stop_selected).pack(side="left", padx=2, expand=True, fill="x")
         ctk.CTkButton(action_frame, text="⏸ Ferma tutti", fg_color="darkred", command=self.stop_all).pack(side="left", padx=2, expand=True, fill="x")
 
-        # --- LOG AREA ---
         log_frame = ctk.CTkFrame(right_frame)
         log_frame.grid(row=1, column=0, sticky="nsew")
         log_frame.grid_rowconfigure(0, weight=1)
@@ -192,7 +198,7 @@ class App(ctk.CTk):
         self.log_text = ctk.CTkTextbox(log_frame)
         self.log_text.pack(fill="both", expand=True, padx=10, pady=5)
 
-    # ---------- METODI PER ACCOUNT ----------
+    # ==================== METODI ACCOUNT ====================
     def refresh_account_list(self):
         for widget in self.account_frame.winfo_children():
             widget.destroy()
@@ -259,6 +265,7 @@ class App(ctk.CTk):
             ("destination", "Destinazione"),
             ("service_level_id", "Service Level ID (1)"),
             ("persons", "Numero persone (default 1)"),
+            ("proxy", "Proxy specifico (host:port:user:pass) - opzionale"),
         ]
         row = 0
         for key, label in fields:
@@ -306,7 +313,7 @@ class App(ctk.CTk):
             for key in ["name", "first_name", "last_name", "email", "password", "birth_date",
                         "gender", "nationality", "residence", "passport_number", "passport_issue_date",
                         "passport_country", "passport_expiry", "phone", "trip_date", "destination",
-                        "persons"]:
+                        "persons", "proxy"]:
                 val = entries.get(key)
                 if val is not None:
                     new_acc[key] = val.get()
@@ -333,7 +340,7 @@ class App(ctk.CTk):
 
         ctk.CTkButton(scroll_frame, text="💾 Salva", command=save).grid(row=row, column=0, columnspan=2, pady=20)
 
-    # ---------- SALVATAGGIO IMPOSTAZIONI ----------
+    # ==================== SALVATAGGIO IMPOSTAZIONI ====================
     def save_global_settings(self):
         self.config["settings"]["check_interval_min"] = int(self.interval.get())
         self.config["settings"]["telegram_bot_token"] = self.tg_token.get()
@@ -341,7 +348,7 @@ class App(ctk.CTk):
         save_config(self.config)
         msgbox.showinfo("Info", "Impostazioni globali salvate")
 
-    def save_proxy_settings(self):
+    def save_global_proxy(self):
         host = self.proxy_host.get().strip()
         port = self.proxy_port.get().strip()
         user = self.proxy_user.get().strip()
@@ -351,9 +358,11 @@ class App(ctk.CTk):
             if user and pwd:
                 proxy_str += f":{user}:{pwd}"
             self.config["settings"]["proxy_list"] = [proxy_str]
+        else:
+            self.config["settings"]["proxy_list"] = []
         self.config["settings"]["proxy_enabled"] = bool(host and port)
         save_config(self.config)
-        msgbox.showinfo("Info", "Impostazioni proxy salvate")
+        msgbox.showinfo("Info", "Proxy globale salvato")
 
     def _load_settings_into_ui(self):
         settings = self.config["settings"]
@@ -371,7 +380,7 @@ class App(ctk.CTk):
                     self.proxy_user.insert(0, parts[2])
                     self.proxy_pass.insert(0, parts[3])
 
-    # ---------- AVVIO E FERMA ----------
+    # ==================== AVVIO E FERMA ====================
     def start_selected(self):
         selected = [name for name, var in self.account_checkboxes.items() if var.get()]
         if not selected:

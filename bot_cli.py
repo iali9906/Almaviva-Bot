@@ -2,7 +2,7 @@
 """
 Almaviva Bot - CLI Engine
 Monitoraggio appuntamenti per singolo account con gestione automatica limiti.
-Notifiche Telegram personalizzate con nome account e firma.
+Supporto proxy.
 """
 import argparse
 import sys
@@ -91,7 +91,8 @@ class RateLimiter:
         self._save()
         log(f"📊 Richieste: sessione {self.session_requests}/{self.session_limit}, giorno {self.daily_requests}/{self.daily_limit}")
 
-def get_token(email, password):
+# ==================== FUNZIONI API (con sessione) ====================
+def get_token(email, password, session):
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     data = {
         "grant_type": "password",
@@ -100,7 +101,7 @@ def get_token(email, password):
         "password": password
     }
     try:
-        r = requests.post(AUTH_TOKEN_URL, headers=headers, data=data, timeout=30)
+        r = session.post(AUTH_TOKEN_URL, headers=headers, data=data, timeout=30)
         if r.status_code != 200:
             log(f"❌ Login fallito: {r.status_code}")
             return None, None
@@ -111,7 +112,7 @@ def get_token(email, password):
         log(f"❌ Errore login: {e}")
         return None, None
 
-def refresh_token(refresh_token_value):
+def refresh_token(refresh_token_value, session):
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     data = {
         "grant_type": "refresh_token",
@@ -119,20 +120,20 @@ def refresh_token(refresh_token_value):
         "refresh_token": refresh_token_value
     }
     try:
-        r = requests.post(AUTH_TOKEN_URL, headers=headers, data=data, timeout=30)
+        r = session.post(AUTH_TOKEN_URL, headers=headers, data=data, timeout=30)
         if r.status_code != 200:
             return None
         return r.json()
     except:
         return None
 
-def check_availability(token, office_id, visa_id, service_level, rate_limiter):
+def check_availability(token, office_id, visa_id, service_level, rate_limiter, session):
     rate_limiter.wait_if_needed()
     url = f"{CHECKS_URL}?officeId={office_id}&visaId={visa_id}&serviceLevelId={service_level}"
     headers = {"Authorization": f"Bearer {token}"}
     start = time.time()
     try:
-        r = requests.get(url, headers=headers, timeout=10)
+        r = session.get(url, headers=headers, timeout=10)
         elapsed = (time.time() - start) * 1000
         if r.status_code == 401:
             return "expired", elapsed, r.status_code
@@ -146,13 +147,13 @@ def check_availability(token, office_id, visa_id, service_level, rate_limiter):
         rate_limiter.increment()
         return False, None, None
 
-def get_free_slots(token, office_id, date, quantity, rate_limiter):
+def get_free_slots(token, office_id, date, quantity, rate_limiter, session):
     rate_limiter.wait_if_needed()
     url = f"{FREE_SLOTS_URL}?officeId={office_id}&quantity={quantity}&date={date}&type=WEB"
     headers = {"Authorization": f"Bearer {token}"}
     start = time.time()
     try:
-        r = requests.get(url, headers=headers, timeout=10)
+        r = session.get(url, headers=headers, timeout=10)
         elapsed = (time.time() - start) * 1000
         if r.status_code == 401:
             return "expired", elapsed, r.status_code
@@ -166,17 +167,17 @@ def get_free_slots(token, office_id, date, quantity, rate_limiter):
         rate_limiter.increment()
         return [], None, None
 
-def send_telegram(bot_token, chat_id, message):
+def send_telegram(bot_token, chat_id, message, session):
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        r = requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=5)
+        r = session.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=5)
         return r.status_code == 200
     except:
         return False
 
-def get_current_ip():
+def get_current_ip(session):
     try:
-        r = requests.get("https://api.ipify.org", timeout=5)
+        r = session.get("https://api.ipify.org", timeout=5)
         return r.text.strip()
     except:
         return "sconosciuto"
@@ -196,7 +197,25 @@ def main():
     parser.add_argument('--persons', type=int, default=1, help='Numero persone')
     parser.add_argument('--destination', default='', help='Destinazione')
     parser.add_argument('--bot-name', default='Almaviva Bot', help='Nome del bot per le notifiche')
+    parser.add_argument('--proxy', default='', help='Proxy in formato host:port:user:pass (opzionale)')
     args = parser.parse_args()
+
+    # Crea sessione condivisa e imposta proxy
+    session = requests.Session()
+    if args.proxy:
+        parts = args.proxy.split(':')
+        if len(parts) >= 2:
+            host = parts[0]
+            port = parts[1]
+            user = parts[2] if len(parts) > 2 else ""
+            pwd = parts[3] if len(parts) > 3 else ""
+            proxy_url = f"http://{host}:{port}"
+            if user and pwd:
+                proxy_url = f"http://{user}:{pwd}@{host}:{port}"
+            session.proxies.update({"http": proxy_url, "https": proxy_url})
+            log(f"🌐 Proxy configurato: {host}:{port}")
+        else:
+            log("⚠️ Formato proxy non valido, ignoro.")
 
     office_ids = [int(x) for x in args.office_ids.split(',')]
     trip_date = args.trip_date or (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
@@ -215,27 +234,27 @@ def main():
     log(f"Intervallo: {args.interval_min} minuti")
 
     rate_limiter = RateLimiter(args.email)
-    token, refresh = get_token(args.email, args.password)
+    token, refresh = get_token(args.email, args.password, session)
     if not token:
         return 1
 
-    current_ip = get_current_ip()
+    current_ip = get_current_ip(session)
 
     while True:
         for office_id in office_ids:
             office_name = "Cairo" if office_id == 1 else "Alessandria"
-            result, rtt_check, status_check = check_availability(token, office_id, args.visa_id, args.service_level, rate_limiter)
+            result, rtt_check, status_check = check_availability(token, office_id, args.visa_id, args.service_level, rate_limiter, session)
             
             if result == "expired":
                 log("Token scaduto, rinnovo...")
                 if refresh:
-                    new_data = refresh_token(refresh)
+                    new_data = refresh_token(refresh, session)
                     if new_data:
                         token = new_data["access_token"]
                         refresh = new_data.get("refresh_token")
                         log("Token rinnovato")
                         continue
-                token, refresh = get_token(args.email, args.password)
+                token, refresh = get_token(args.email, args.password, session)
                 if not token:
                     time.sleep(60)
                 continue
@@ -245,25 +264,27 @@ def main():
                 continue
             if result is True:
                 log(f"✅ Disponibilità per {office_name}! Recupero slot...")
-                slots, rtt_slots, status_slots = get_free_slots(token, office_id, trip_date, args.persons, rate_limiter)
+                slots, rtt_slots, status_slots = get_free_slots(token, office_id, trip_date, args.persons, rate_limiter, session)
                 if slots and len(slots) > 0:
                     msg = f"<b>🎯 <u>SLOT TROVATO PER {display_name}</u></b> 🎯\n"
                     msg += f"<b>🤖 Bot:</b> {args.bot_name}\n"
                     msg += f"<b>📧 Email:</b> {args.email}\n"
                     msg += f"<b>🏢 Centro:</b> {office_name}\n"
                     msg += f"<b>💳 Servizio:</b> Standard - EGP 1875\n"
-                    msg += f"<b>🎫 Visto:</b> {visa_name}\n"
+                    msg += f"<b>🎫 Visto:</b> {visa_name} (ID {args.visa_id})\n"
                     msg += f"<b>📅 Data viaggio:</b> {trip_date}\n"
-                    msg += f"<b>⏰ Slot disponibile:</b> {slots[0] if slots else 'N/A'}\n"
+                    msg += f"<b>⏰ Slot disponibile:</b> {slots[0]}\n"
                     msg += f"<b>🌐 IP utilizzato:</b> {current_ip}\n"
-                    msg += f"<b>📊 RTT /checks:</b> {rtt_check:.0f} ms (status {status_check})\n" if rtt_check else ""
-                    msg += f"<b>📊 RTT /free:</b> {rtt_slots:.0f} ms (status {status_slots})\n" if rtt_slots else ""
-                    msg += f"<b>Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    if rtt_check is not None:
+                        msg += f"<b>📊 RTT /checks:</b> {rtt_check:.0f} ms (status {status_check})\n"
+                    if rtt_slots is not None:
+                        msg += f"<b>📊 RTT /free:</b> {rtt_slots:.0f} ms (status {status_slots})\n"
+                    msg += f"<b>⏱️ Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                     msg += f"\nBY Ibrahim ALI"
 
                     log(f"Notifica inviata per {display_name}")
                     if args.telegram_token and args.telegram_chat:
-                        send_telegram(args.telegram_token, args.telegram_chat, msg)
+                        send_telegram(args.telegram_token, args.telegram_chat, msg, session)
                         log("✅ Notifica Telegram inviata")
                     else:
                         log("⚠️ Telegram non configurato, notifica non inviata")
