@@ -27,7 +27,7 @@ CLIENT_ID = "aa-visasys-public"
 
 # Temporizzazioni (valori in secondi)
 DEFAULT_CHECK_INTERVAL_SEC = 300     # 5 minuti
-REQUEST_DELAY_SECONDS = 30
+REQUEST_DELAY_SECONDS = 0
 MAX_RETRIES = 3
 BASE_BACKOFF_SECONDS = 60
 

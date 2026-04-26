@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Almaviva Bot - CLI Engine
-Monitoraggio appuntamenti per singolo account con gestione limiti e parallelizzazione.
+Monitoraggio appuntamenti per singolo account con gestione automatica limiti.
+Supporto proxy e parallelizzazione degli uffici.
 """
 import argparse
 import sys
@@ -131,10 +132,10 @@ def check_availability(token, office_id, visa_id, service_level, rate_limiter, s
     rate_limiter.wait_if_needed()
     url = f"{CHECKS_URL}?officeId={office_id}&visaId={visa_id}&serviceLevelId={service_level}"
     headers = {"Authorization": f"Bearer {token}"}
-    start = time.time()
+    start = datetime.now()
     try:
         r = session.get(url, headers=headers, timeout=15)
-        elapsed = (time.time() - start) * 1000
+        elapsed = (datetime.now() - start).total_seconds()
         if r.status_code == 401:
             return "expired", elapsed, r.status_code
         if r.status_code == 429:
@@ -151,10 +152,10 @@ def get_free_slots(token, office_id, date, quantity, rate_limiter, session):
     rate_limiter.wait_if_needed()
     url = f"{FREE_SLOTS_URL}?officeId={office_id}&quantity={quantity}&date={date}&type=WEB"
     headers = {"Authorization": f"Bearer {token}"}
-    start = time.time()
+    start = datetime.now()
     try:
         r = session.get(url, headers=headers, timeout=15)
-        elapsed = (time.time() - start) * 1000
+        elapsed = (datetime.now() - start).total_seconds()
         if r.status_code == 401:
             return "expired", elapsed, r.status_code
         if r.status_code == 429:
@@ -186,22 +187,27 @@ def get_current_ip(session):
 
 def process_office(office_id, token, trip_date, args, rate_limiter, session):
     office_name = "Cairo" if office_id == 1 else "Alessandria"
-    result, rtt_check, status_check = check_availability(token, office_id, args.visa_id, args.service_level, rate_limiter, session)
+    result, elapsed_check, status_check = check_availability(token, office_id, args.visa_id, args.service_level, rate_limiter, session)
     if result == "expired":
         return {"status": "expired"}
     if result == "rate_limit":
         return {"status": "rate_limit"}
     if result is True:
-        slots, rtt_slots, status_slots = get_free_slots(token, office_id, trip_date, args.persons, rate_limiter, session)
+        slots, elapsed_slots, status_slots = get_free_slots(token, office_id, trip_date, args.persons, rate_limiter, session)
         if slots and len(slots) > 0:
+            # Converti in millisecondi per RTT
+            rtt_check_ms = elapsed_check * 1000 if elapsed_check is not None else None
+            rtt_slots_ms = elapsed_slots * 1000 if elapsed_slots is not None else None
             return {
                 "status": "available",
                 "office_name": office_name,
                 "slots": slots,
-                "rtt_check": rtt_check,
+                "elapsed_check": elapsed_check,
+                "elapsed_slots": elapsed_slots,
                 "status_check": status_check,
-                "rtt_slots": rtt_slots,
-                "status_slots": status_slots
+                "status_slots": status_slots,
+                "rtt_check_ms": rtt_check_ms,
+                "rtt_slots_ms": rtt_slots_ms
             }
         else:
             return {"status": "nothing"}
@@ -290,27 +296,34 @@ def main():
                 elif result["status"] == "available":
                     office_name = result["office_name"]
                     slots = result["slots"]
-                    rtt_check = result["rtt_check"]
+                    elapsed_check = result["elapsed_check"]
+                    elapsed_slots = result["elapsed_slots"]
                     status_check = result["status_check"]
-                    rtt_slots = result["rtt_slots"]
                     status_slots = result["status_slots"]
+                    rtt_check_ms = result["rtt_check_ms"]
+                    rtt_slots_ms = result["rtt_slots_ms"]
+
+                    speed_check = f"{elapsed_check:.3f}s" if elapsed_check is not None else "N/A"
+                    speed_slots = f"{elapsed_slots:.3f}s" if elapsed_slots is not None else "N/A"
 
                     msg = f"<b>🎯 <u>SLOT TROVATO PER {display_name}</u></b> 🎯\n"
+                    msg += f"=================================\n"
                     msg += f"<b>🤖 Bot:</b> {args.bot_name}\n"
                     msg += f"<b>📧 Email:</b> {args.email}\n"
                     msg += f"<b>🏢 Centro:</b> {office_name}\n"
-                    msg += f"<b>💳 Servizio:</b> Standard - EGP 1875\n"
-                    msg += f"<b>🎫 Visto:</b> {visa_name}"
-                    if args.visa_id:
-                        msg += f" (ID {args.visa_id})"
-                    msg += f"\n<b>📅 Data viaggio:</b> {trip_date}\n"
-                    msg += f"<b>⏰ Slot disponibile:</b> {slots[0]}\n"
-                    msg += f"<b>🌐 IP utilizzato:</b> {current_ip}\n"
-                    if rtt_check is not None:
-                        msg += f"<b>📊 RTT /checks:</b> {rtt_check:.0f} ms (status {status_check})\n"
-                    if rtt_slots is not None:
-                        msg += f"<b>📊 RTT /free:</b> {rtt_slots:.0f} ms (status {status_slots})\n"
+                    msg += f"<b>🎫 Visto:</b> {visa_name} (ID {args.visa_id})\n"
+                    msg += f"<b>📅 Data viaggio:</b> {trip_date}\n"
+                    msg += f"<b>⏰ Slot:</b> {slots[0]}\n"
+                    msg += f"<b>🌐 IP:</b> {current_ip}\n"
+                    msg += f"<b>📤 Richiesta inviata:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n"
+                    msg += f"<b>⚡ Velocità /checks:</b> {speed_check} (status {status_check})\n"
+                    msg += f"<b>⚡ Velocità /free:</b> {speed_slots} (status {status_slots})\n"
+                    if rtt_check_ms is not None:
+                        msg += f"<b>📊 RTT /checks:</b> {rtt_check_ms:.0f} ms (status {status_check})\n"
+                    if rtt_slots_ms is not None:
+                        msg += f"<b>📊 RTT /free:</b> {rtt_slots_ms:.0f} ms (status {status_slots})\n"
                     msg += f"<b>⏱️ Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    msg += f"=================================\n"
                     msg += f"\nBY Ibrahim ALI"
 
                     log(f"Notifica inviata per {display_name}")
