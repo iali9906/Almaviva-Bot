@@ -14,7 +14,10 @@ from config import load_config, save_config
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+COUNTERS_FILE = "request_counters.json"
+
 class BotProcess:
+    # ... (invariato, come nella versione stabile) ...
     def __init__(self, account, settings, log_callback):
         self.account = account
         self.settings = settings
@@ -30,6 +33,9 @@ class BotProcess:
         office_ids = [1, 2] if self.account.get("all_offices", True) else [OFFICES.get(self.account.get("office_id", "Cairo"), 1)]
         trip_date = self.account.get("trip_date", "")
         interval_sec = self.settings.get("check_interval_sec", DEFAULT_CHECK_INTERVAL_SEC)
+        request_delay_sec = self.settings.get("request_delay_sec", 30)
+        session_limit = self.settings.get("session_limit", 28)
+        daily_limit = self.settings.get("daily_limit", 70)
         tg_token = self.settings.get("telegram_bot_token", "")
         tg_chat = self.settings.get("telegram_chat_id", "")
         service_level = int(self.account.get("service_level_id", 1))
@@ -38,7 +44,6 @@ class BotProcess:
         password = self.account["password"]
         account_name = self.account.get("name", email)
 
-        # Proxy: specifico dell'account o globale
         account_proxy = self.account.get("proxy", "").strip()
         global_proxy_enabled = self.settings.get("proxy_enabled", False)
         global_proxy_list = self.settings.get("proxy_list", [])
@@ -57,6 +62,9 @@ class BotProcess:
             "--visa-id", str(visa_id),
             "--office-ids", ",".join(str(o) for o in office_ids),
             "--interval-sec", str(interval_sec),
+            "--request-delay", str(request_delay_sec),
+            "--session-limit", str(session_limit),
+            "--daily-limit", str(daily_limit),
             "--service-level", str(service_level),
             "--persons", str(persons),
             "--bot-name", "IBRA TECH BOT"
@@ -102,11 +110,29 @@ class App(ctk.CTk):
         self.processes = {}
         self._create_widgets()
         self._load_settings_into_ui()
+        self.update_counters()  # avvia aggiornamento contatori
 
     def _log(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.insert("end", f"[{timestamp}] {msg}\n")
         self.log_text.see("end")
+
+    def update_counters(self):
+        """Aggiorna il label dei contatori leggendo il file JSON (ogni 5 secondi)"""
+        try:
+            if os.path.exists(COUNTERS_FILE):
+                with open(COUNTERS_FILE, "r") as f:
+                    data = json.load(f)
+                session_req = data.get('session_requests', 0)
+                session_limit = data.get('session_limit', 28)
+                daily_req = data.get('daily_requests', 0)
+                daily_limit = data.get('daily_limit', 70)
+                self.counter_label.configure(text=f"📊 Contatori: sessione {session_req}/{session_limit} | giorno {daily_req}/{daily_limit}")
+            else:
+                self.counter_label.configure(text="📊 Contatori: nessun dato")
+        except Exception as e:
+            self.counter_label.configure(text="📊 Contatori: errore")
+        self.after(5000, self.update_counters)
 
     def _create_widgets(self):
         self.grid_columnconfigure(0, weight=0)  # left panel (impostazioni)
@@ -122,6 +148,10 @@ class App(ctk.CTk):
 
         logo_label = ctk.CTkLabel(settings_scroll, text="🤖 IBRA TECH BOT", font=("Arial", 20, "bold"))
         logo_label.pack(pady=(10,15))
+
+        # Label contatori
+        self.counter_label = ctk.CTkLabel(settings_scroll, text="📊 Contatori: caricamento...", font=("Arial", 12))
+        self.counter_label.pack(pady=5)
 
         # --- PROXY GLOBALE ---
         proxy_frame = ctk.CTkFrame(settings_scroll)
@@ -142,10 +172,27 @@ class App(ctk.CTk):
         global_frame.pack(fill="x", pady=10)
         ctk.CTkLabel(global_frame, text="IMPOSTAZIONI GLOBALI", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(5,0))
 
+        # Intervallo controllo (secondi)
         ctk.CTkLabel(global_frame, text="Intervallo di controllo (secondi)").pack(anchor="w", padx=10)
         self.interval = ctk.CTkEntry(global_frame, width=120)
         self.interval.pack(anchor="w", padx=10, pady=2)
 
+        # Delay tra richieste (secondi)
+        ctk.CTkLabel(global_frame, text="Delay tra richieste (secondi)").pack(anchor="w", padx=10)
+        self.request_delay = ctk.CTkEntry(global_frame, width=120)
+        self.request_delay.pack(anchor="w", padx=10, pady=2)
+
+        # Limite sessione
+        ctk.CTkLabel(global_frame, text="Limite sessione (richieste/30 min)").pack(anchor="w", padx=10)
+        self.session_limit = ctk.CTkEntry(global_frame, width=80)
+        self.session_limit.pack(anchor="w", padx=10, pady=2)
+
+        # Limite giornaliero
+        ctk.CTkLabel(global_frame, text="Limite giornaliero (richieste/24h)").pack(anchor="w", padx=10)
+        self.daily_limit = ctk.CTkEntry(global_frame, width=80)
+        self.daily_limit.pack(anchor="w", padx=10, pady=2)
+
+        # Telegram
         ctk.CTkLabel(global_frame, text="Telegram Bot Token").pack(anchor="w", padx=10)
         self.tg_token = ctk.CTkEntry(global_frame, width=300)
         self.tg_token.pack(anchor="w", padx=10, pady=2)
@@ -159,11 +206,11 @@ class App(ctk.CTk):
         footer_left = ctk.CTkLabel(settings_scroll, text="© 2019-2026 • IBRA TECH", font=("Arial", 9))
         footer_left.pack(pady=(15,5))
 
-        # RIGHT PANEL - ACCOUNT + LOG
+        # RIGHT PANEL - ACCOUNT + LOG (identico alla versione stabile)
         right_frame = ctk.CTkFrame(self)
         right_frame.grid(row=0, column=1, sticky="nsew", padx=(0,10), pady=10)
-        right_frame.grid_rowconfigure(0, weight=0)  # account list
-        right_frame.grid_rowconfigure(1, weight=1)  # log
+        right_frame.grid_rowconfigure(0, weight=0)
+        right_frame.grid_rowconfigure(1, weight=1)
         right_frame.grid_columnconfigure(0, weight=1)
 
         account_container = ctk.CTkFrame(right_frame)
@@ -198,7 +245,7 @@ class App(ctk.CTk):
         self.log_text = ctk.CTkTextbox(log_frame)
         self.log_text.pack(fill="both", expand=True, padx=10, pady=5)
 
-    # ==================== METODI ACCOUNT ====================
+    # ==================== METODI ACCOUNT (invariati) ====================
     def refresh_account_list(self):
         for widget in self.account_frame.winfo_children():
             widget.destroy()
@@ -343,6 +390,9 @@ class App(ctk.CTk):
     # ==================== SALVATAGGIO IMPOSTAZIONI ====================
     def save_global_settings(self):
         self.config["settings"]["check_interval_sec"] = int(self.interval.get())
+        self.config["settings"]["request_delay_sec"] = int(self.request_delay.get())
+        self.config["settings"]["session_limit"] = int(self.session_limit.get())
+        self.config["settings"]["daily_limit"] = int(self.daily_limit.get())
         self.config["settings"]["telegram_bot_token"] = self.tg_token.get()
         self.config["settings"]["telegram_chat_id"] = self.tg_chat.get()
         save_config(self.config)
@@ -367,6 +417,9 @@ class App(ctk.CTk):
     def _load_settings_into_ui(self):
         settings = self.config["settings"]
         self.interval.insert(0, str(settings.get("check_interval_sec", DEFAULT_CHECK_INTERVAL_SEC)))
+        self.request_delay.insert(0, str(settings.get("request_delay_sec", 30)))
+        self.session_limit.insert(0, str(settings.get("session_limit", 28)))
+        self.daily_limit.insert(0, str(settings.get("daily_limit", 70)))
         self.tg_token.insert(0, settings.get("telegram_bot_token", ""))
         self.tg_chat.insert(0, settings.get("telegram_chat_id", ""))
         proxy_list = settings.get("proxy_list", [])
@@ -395,6 +448,9 @@ class App(ctk.CTk):
                 continue
             settings = self.config["settings"].copy()
             settings["check_interval_sec"] = int(self.interval.get())
+            settings["request_delay_sec"] = int(self.request_delay.get())
+            settings["session_limit"] = int(self.session_limit.get())
+            settings["daily_limit"] = int(self.daily_limit.get())
             settings["telegram_bot_token"] = self.tg_token.get()
             settings["telegram_chat_id"] = self.tg_chat.get()
             proc = BotProcess(acc, settings, self._log)

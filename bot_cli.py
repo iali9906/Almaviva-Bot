@@ -229,6 +229,9 @@ def main():
     parser.add_argument('--destination', default='', help='Destinazione')
     parser.add_argument('--bot-name', default='Almaviva Bot', help='Nome del bot per le notifiche')
     parser.add_argument('--proxy', default='', help='Proxy in formato host:port:user:pass (opzionale)')
+    parser.add_argument('--request-delay', type=int, default=30, help='Delay tra richieste (secondi)')
+    parser.add_argument('--session-limit', type=int, default=28, help='Limite richieste per sessione (30 min)')
+    parser.add_argument('--daily-limit', type=int, default=70, help='Limite richieste giornaliero')
     args = parser.parse_args()
 
     session = requests.Session()
