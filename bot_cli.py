@@ -2,27 +2,24 @@
 """
 Almaviva Bot - CLI Engine
 Monitoraggio appuntamenti per singolo account con gestione automatica limiti.
-Supporta --delay-sec per pausa tra richieste.
+Supporto proxy e parallelizzazione degli uffici. Salva contatori su file separato per account.
 """
 import argparse
 import sys
 import time
 import json
 import os
+import random
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 from constants import AUTH_TOKEN_URL, CLIENT_ID, CHECKS_URL, FREE_SLOTS_URL, VISA_TYPES, OFFICES
-from utils import wait_seconds
-
-COUNTERS_FILE = "request_counters.json"
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 class RateLimiter:
-    # ... invariato (stesso codice della versione precedente) ...
     def __init__(self, email, session_limit=28, daily_limit=70):
         self.email = email
         self.session_limit = session_limit
@@ -31,12 +28,15 @@ class RateLimiter:
         self.daily_requests = 0
         self.session_reset = time.time() + 1800
         self.daily_reset = time.time() + 86400
+        # Crea un nome file sicuro dall'email
+        safe_email = email.replace('@', '_').replace('.', '_')
+        self.counters_file = f"request_counters_{safe_email}.json"
         self._load()
 
     def _load(self):
-        if os.path.exists(COUNTERS_FILE):
+        if os.path.exists(self.counters_file):
             try:
-                with open(COUNTERS_FILE, "r") as f:
+                with open(self.counters_file, "r") as f:
                     data = json.load(f)
                 if data.get("email") == self.email:
                     self.session_requests = data.get("session_requests", 0)
@@ -49,7 +49,7 @@ class RateLimiter:
 
     def _save(self):
         try:
-            with open(COUNTERS_FILE, "w") as f:
+            with open(self.counters_file, "w") as f:
                 json.dump({
                     "email": self.email,
                     "session_requests": self.session_requests,
@@ -108,7 +108,7 @@ def get_token(email, password, session):
             log(f"❌ Login fallito: {r.status_code}")
             return None, None
         token_data = r.json()
-        log("✅ Token obtenuto")
+        log("✅ Token ottenuto")
         return token_data["access_token"], token_data.get("refresh_token")
     except Exception as e:
         log(f"❌ Errore login: {e}")
@@ -213,6 +213,12 @@ def process_office(office_id, token, trip_date, args, rate_limiter, session):
             return {"status": "nothing"}
     return {"status": "nothing"}
 
+def sleep_between_requests(delay_sec):
+    if delay_sec <= 0:
+        return
+    jitter = random.uniform(0.8, 1.2)
+    time.sleep(delay_sec * jitter)
+
 def main():
     parser = argparse.ArgumentParser(description='Almaviva Bot CLI Engine')
     parser.add_argument('--email', required=True, help='Email account')
@@ -268,11 +274,11 @@ def main():
 
     current_ip = get_current_ip(session)
 
+    # Modalità sequenziale o parallela in base al delay
     while True:
-        with ThreadPoolExecutor(max_workers=len(office_ids)) as executor:
-            futures = {executor.submit(process_office, oid, token, trip_date, args, rate_limiter, session): oid for oid in office_ids}
-            for future in as_completed(futures):
-                result = future.result()
+        if delay_sec > 0:
+            for office_id in office_ids:
+                result = process_office(office_id, token, trip_date, args, rate_limiter, session)
                 if result["status"] == "expired":
                     log("Token scaduto, rinnovo...")
                     if refresh:
@@ -330,10 +336,71 @@ def main():
                     else:
                         log("⚠️ Telegram non configurato, notifica non inviata")
                     return 0
+                sleep_between_requests(delay_sec)
+        else:
+            # Modalità parallela
+            with ThreadPoolExecutor(max_workers=len(office_ids)) as executor:
+                futures = {executor.submit(process_office, oid, token, trip_date, args, rate_limiter, session): oid for oid in office_ids}
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result["status"] == "expired":
+                        log("Token scaduto, rinnovo...")
+                        if refresh:
+                            new_data = refresh_token(refresh, session)
+                            if new_data:
+                                token = new_data["access_token"]
+                                refresh = new_data.get("refresh_token")
+                                log("Token rinnovato")
+                                break
+                        else:
+                            token, refresh = get_token(args.email, args.password, session)
+                            if not token: time.sleep(60)
+                            break
+                    elif result["status"] == "rate_limit":
+                        log("Rate limit (429), attendo 60 secondi")
+                        time.sleep(60)
+                        break
+                    elif result["status"] == "available":
+                        office_name = result["office_name"]
+                        slots = result["slots"]
+                        elapsed_check = result["elapsed_check"]
+                        elapsed_slots = result["elapsed_slots"]
+                        status_check = result["status_check"]
+                        status_slots = result["status_slots"]
+                        rtt_check_ms = result["rtt_check_ms"]
+                        rtt_slots_ms = result["rtt_slots_ms"]
+
+                        speed_check = f"{elapsed_check:.3f}s" if elapsed_check is not None else "N/A"
+                        speed_slots = f"{elapsed_slots:.3f}s" if elapsed_slots is not None else "N/A"
+
+                        msg = f"<b>🎯 <u>SLOT TROVATO PER {display_name}</u></b> 🎯\n"
+                        msg += f"=================================\n"
+                        msg += f"<b>🤖 Bot:</b> {args.bot_name}\n"
+                        msg += f"<b>📧 Email:</b> {args.email}\n"
+                        msg += f"<b>🏢 Centro:</b> {office_name}\n"
+                        msg += f"<b>🎫 Visto:</b> {visa_name} (ID {args.visa_id})\n"
+                        msg += f"<b>📅 Data viaggio:</b> {trip_date}\n"
+                        msg += f"<b>⏰ Slot:</b> {slots[0]}\n"
+                        msg += f"<b>🌐 IP:</b> {current_ip}\n"
+                        msg += f"<b>📤 Richiesta inviata:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n"
+                        msg += f"<b>⚡ Velocità /checks:</b> {speed_check} (status {status_check})\n"
+                        msg += f"<b>⚡ Velocità /free:</b> {speed_slots} (status {status_slots})\n"
+                        if rtt_check_ms is not None:
+                            msg += f"<b>📊 RTT /checks:</b> {rtt_check_ms:.0f} ms (status {status_check})\n"
+                        if rtt_slots_ms is not None:
+                            msg += f"<b>📊 RTT /free:</b> {rtt_slots_ms:.0f} ms (status {status_slots})\n"
+                        msg += f"<b>⏱️ Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        msg += f"=================================\n"
+                        msg += f"\nBY Ibrahim ALI"
+
+                        log(f"Notifica inviata per {display_name}")
+                        if args.telegram_token and args.telegram_chat:
+                            send_telegram(args.telegram_token, args.telegram_chat, msg)
+                            log("✅ Notifica Telegram inviata")
+                        else:
+                            log("⚠️ Telegram non configurato, notifica non inviata")
+                        return 0
         time.sleep(interval_sec)
-        # Se delay_sec > 0, aggiungi una pausa extra dopo ogni ciclo? No, già nel for si attenderebbe.
-        # Nota: process_office già esegue richieste in parallelo; non c'è un posto semplice per mettere delay_sec.
-        # Meglio implementare una pausa tra richieste consecutive se necessario. Per ora lo ignoriamo.
 
 if __name__ == "__main__":
     try:

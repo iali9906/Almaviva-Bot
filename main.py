@@ -101,9 +101,12 @@ class App(ctk.CTk):
         self.minsize(1000, 600)
         self.config = load_config()
         self.processes = {}
+        self.account_checkboxes = {}
+        self.table_labels = {}   # nome -> dict di label
         self._create_widgets()
         self._load_settings_into_ui()
         self._start_clock()
+        self._start_counters_updater()
 
     def _start_clock(self):
         self.update_clock()
@@ -111,19 +114,83 @@ class App(ctk.CTk):
     def update_clock(self):
         now = datetime.now()
         time_str = now.strftime("%H:%M:%S") + f".{now.microsecond // 1000:03d}"
-        self.clock_label.configure(text=time_str)
-        self.after(10, self.update_clock)  # aggiorna ogni 10 ms
+        self.title(f"IBRA TECH BOT Controller - {time_str}")
+        self.after(10, self.update_clock)
+
+    def _start_counters_updater(self):
+        self.update_counters()
+        self.after(5000, self._start_counters_updater)
+
+    def update_counters(self):
+        # Legge i contatori e aggiorna la tabella
+        for acc in self.config.get("accounts", []):
+            name = acc.get("name")
+            email = acc.get("email")
+            if not name:
+                continue
+            safe_email = email.replace('@', '_').replace('.', '_')
+            counters_file = f"request_counters_{safe_email}.json"
+            session_req = 0
+            daily_req = 0
+            if os.path.exists(counters_file):
+                try:
+                    with open(counters_file, "r") as f:
+                        data = json.load(f)
+                    session_req = data.get('session_requests', 0)
+                    daily_req = data.get('daily_requests', 0)
+                except:
+                    pass
+            if name in self.table_labels:
+                self.table_labels[name]["session"].configure(text=f"{session_req}/28")
+                self.table_labels[name]["daily"].configure(text=f"{daily_req}/70")
+            else:
+                # se l'account non è ancora nella tabella (aggiunto dopo la creazione), ricostruisci tabella
+                self.rebuild_accounts_table()
+                return
 
     def _log(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         self.log_text.insert("end", f"[{timestamp}] {msg}\n")
         self.log_text.see("end")
 
+    def rebuild_accounts_table(self):
+        # Ricostruisce completamente la tabella (usato dopo aggiunta/modifica/elimina account)
+        for widget in self.table_frame.winfo_children():
+            widget.destroy()
+        self.table_labels.clear()
+        # Intestazioni
+        headers = ["Seleziona", "Account", "Email", "Sessione", "Giorno"]
+        for col, txt in enumerate(headers):
+            lbl = ctk.CTkLabel(self.table_frame, text=txt, font=("Arial", 11, "bold"))
+            lbl.grid(row=0, column=col, padx=5, pady=2, sticky="ew")
+        # Righe
+        row = 1
+        self.account_checkboxes.clear()
+        for acc in self.config.get("accounts", []):
+            name = acc.get("name", "")
+            email = acc.get("email", "")
+            var = ctk.BooleanVar(value=False)
+            cb = ctk.CTkCheckBox(self.table_frame, text="", variable=var, width=20)
+            cb.grid(row=row, column=0, padx=5, pady=2)
+            self.account_checkboxes[name] = var
+            ctk.CTkLabel(self.table_frame, text=name).grid(row=row, column=1, padx=5, pady=2)
+            ctk.CTkLabel(self.table_frame, text=email).grid(row=row, column=2, padx=5, pady=2)
+            lbl_session = ctk.CTkLabel(self.table_frame, text="0/28")
+            lbl_session.grid(row=row, column=3, padx=5, pady=2)
+            lbl_daily = ctk.CTkLabel(self.table_frame, text="0/70")
+            lbl_daily.grid(row=row, column=4, padx=5, pady=2)
+            self.table_labels[name] = {"session": lbl_session, "daily": lbl_daily}
+            row += 1
+        for col in range(len(headers)):
+            self.table_frame.grid_columnconfigure(col, weight=1)
+
     def _create_widgets(self):
+        # Layout: left panel (impostazioni), right panel (account + log)
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
+        # LEFT PANEL (impostazioni)
         left_frame = ctk.CTkFrame(self, width=380)
         left_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         left_frame.grid_propagate(False)
@@ -131,18 +198,7 @@ class App(ctk.CTk):
         settings_scroll = ctk.CTkScrollableFrame(left_frame, height=700)
         settings_scroll.pack(fill="both", expand=True)
 
-        # Header con logo e orologio
-        header_frame = ctk.CTkFrame(settings_scroll, fg_color="transparent")
-        header_frame.pack(fill="x", pady=5)
-        logo_label = ctk.CTkLabel(header_frame, text="🤖 IBRA TECH BOT", font=("Arial", 20, "bold"))
-        logo_label.pack(side="left", padx=10)
-        self.clock_label = ctk.CTkLabel(header_frame, text="", font=("Arial", 20, "bold"))
-        self.clock_label.pack(side="right", padx=10)
-
-        # Contatori
-        self.counters_label = ctk.CTkLabel(settings_scroll, text="📊 Contatori: --/-- (sessione) --/-- (giorno)", font=("Arial", 12))
-        self.counters_label.pack(pady=5)
-        self.update_counters()
+        ctk.CTkLabel(settings_scroll, text="🤖 IBRA TECH BOT", font=("Arial", 20, "bold")).pack(pady=(10,5))
 
         # PROXY GLOBALE
         proxy_frame = ctk.CTkFrame(settings_scroll)
@@ -183,73 +239,40 @@ class App(ctk.CTk):
         footer_left = ctk.CTkLabel(settings_scroll, text="© 2019-2026 • IBRA TECH", font=("Arial", 9))
         footer_left.pack(pady=(15,5))
 
-        # RIGHT PANEL - ACCOUNT + LOG
+        # RIGHT PANEL (account + log)
         right_frame = ctk.CTkFrame(self)
         right_frame.grid(row=0, column=1, sticky="nsew", padx=(0,10), pady=10)
-        right_frame.grid_rowconfigure(0, weight=0)  # account list
-        right_frame.grid_rowconfigure(1, weight=1)  # log
+        right_frame.grid_rowconfigure(0, weight=0)   # account table
+        right_frame.grid_rowconfigure(1, weight=1)   # log
         right_frame.grid_columnconfigure(0, weight=1)
 
-        account_container = ctk.CTkFrame(right_frame)
-        account_container.grid(row=0, column=0, sticky="nsew", pady=(0,10))
-        account_container.grid_rowconfigure(0, weight=1)
-        account_container.grid_columnconfigure(0, weight=1)
+        # Tabella account
+        account_frame = ctk.CTkFrame(right_frame)
+        account_frame.grid(row=0, column=0, sticky="nsew", pady=(0,10))
+        account_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(account_frame, text="ACCOUNT", font=("Arial", 16, "bold")).pack(anchor="w", padx=10, pady=(5,0))
+        self.table_frame = ctk.CTkFrame(account_frame)
+        self.table_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        self.rebuild_accounts_table()
 
-        ctk.CTkLabel(account_container, text="ACCOUNT", font=("Arial", 16, "bold")).pack(anchor="w", padx=10, pady=(5,0))
-
-        self.account_frame = ctk.CTkScrollableFrame(account_container, height=250)
-        self.account_frame.pack(fill="both", expand=True, padx=10, pady=5)
-        self.account_checkboxes = {}
-        self.refresh_account_list()
-
-        btn_frame = ctk.CTkFrame(account_container)
-        btn_frame.pack(fill="x", padx=10, pady=5)
-        ctk.CTkButton(btn_frame, text="➕ Nuovo", width=80, command=self.add_account).pack(side="left", padx=2)
-        ctk.CTkButton(btn_frame, text="✏️ Modifica", width=80, command=self.edit_account).pack(side="left", padx=2)
-        ctk.CTkButton(btn_frame, text="🗑️ Elimina", width=80, command=self.delete_account).pack(side="left", padx=2)
-
-        action_frame = ctk.CTkFrame(account_container)
+        # Pulsanti azione sotto la tabella
+        action_frame = ctk.CTkFrame(account_frame)
         action_frame.pack(fill="x", padx=10, pady=5)
+        ctk.CTkButton(action_frame, text="➕ Nuovo", width=80, command=self.add_account).pack(side="left", padx=2)
+        ctk.CTkButton(action_frame, text="✏️ Modifica", width=80, command=self.edit_account).pack(side="left", padx=2)
+        ctk.CTkButton(action_frame, text="🗑️ Elimina", width=80, command=self.delete_account).pack(side="left", padx=2)
         ctk.CTkButton(action_frame, text="▶ Avvia selezionati", fg_color="green", command=self.start_selected).pack(side="left", padx=2, expand=True, fill="x")
         ctk.CTkButton(action_frame, text="⏹ Ferma selezionati", fg_color="red", command=self.stop_selected).pack(side="left", padx=2, expand=True, fill="x")
         ctk.CTkButton(action_frame, text="⏸ Ferma tutti", fg_color="darkred", command=self.stop_all).pack(side="left", padx=2, expand=True, fill="x")
 
+        # Log area
         log_frame = ctk.CTkFrame(right_frame)
         log_frame.grid(row=1, column=0, sticky="nsew")
         log_frame.grid_rowconfigure(0, weight=1)
         log_frame.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(log_frame, text="LOG", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(5,0))
-        self.log_text = ctk.CTkTextbox(log_frame)
+        self.log_text = ctk.CTkTextbox(log_frame, height=300)
         self.log_text.pack(fill="both", expand=True, padx=10, pady=5)
-
-    def update_counters(self):
-        try:
-            if os.path.exists("request_counters.json"):
-                with open("request_counters.json", "r") as f:
-                    data = json.load(f)
-                session_req = data.get('session_requests', 0)
-                daily_req = data.get('daily_requests', 0)
-                # I limiti sono definiti in constants.py (28 e 70)
-                session_limit = 28
-                daily_limit = 70
-                self.counters_label.configure(text=f"📊 Contatori: {session_req}/{session_limit} (sessione) | {daily_req}/{daily_limit} (giorno)")
-            else:
-                self.counters_label.configure(text="📊 Contatori: file non trovato")
-        except Exception:
-            self.counters_label.configure(text="📊 Contatori: errore")
-        self.after(5000, self.update_counters)
-
-    # ---------- METODI ACCOUNT (invariati) ----------
-    def refresh_account_list(self):
-        for widget in self.account_frame.winfo_children():
-            widget.destroy()
-        self.account_checkboxes.clear()
-        for acc in self.config.get("accounts", []):
-            name = acc.get("name", "Senza nome")
-            var = ctk.BooleanVar(value=False)
-            cb = ctk.CTkCheckBox(self.account_frame, text=name, variable=var)
-            cb.pack(anchor="w", padx=10, pady=2)
-            self.account_checkboxes[name] = var
 
     def add_account(self):
         self.open_account_editor()
@@ -273,7 +296,7 @@ class App(ctk.CTk):
         for name in selected:
             self.config["accounts"] = [a for a in self.config["accounts"] if a.get("name") != name]
         save_config(self.config)
-        self.refresh_account_list()
+        self.rebuild_accounts_table()
         self._log(f"Eliminati account: {', '.join(selected)}")
 
     def open_account_editor(self, account=None):
@@ -376,7 +399,7 @@ class App(ctk.CTk):
             else:
                 self.config["accounts"].append(new_acc)
             save_config(self.config)
-            self.refresh_account_list()
+            self.rebuild_accounts_table()
             editor.destroy()
 
         ctk.CTkButton(scroll_frame, text="💾 Salva", command=save).grid(row=row, column=0, columnspan=2, pady=20)
@@ -458,7 +481,7 @@ class App(ctk.CTk):
         for name, proc in list(self.processes.items()):
             proc.stop()
             del self.processes[name]
-            self._log(f"Fermato monitoraggio per {name}")
+        self._log("Fermati tutti i monitoraggi")
 
 if __name__ == "__main__":
     app = App()
