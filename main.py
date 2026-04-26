@@ -57,6 +57,7 @@ class BotProcess:
             "--visa-id", str(visa_id),
             "--office-ids", ",".join(str(o) for o in office_ids),
             "--interval-sec", str(interval_sec),
+            "--delay-sec", str(delay_sec),
             "--service-level", str(service_level),
             "--persons", str(persons),
             "--bot-name", "IBRA TECH BOT"
@@ -67,8 +68,6 @@ class BotProcess:
             cmd.extend(["--telegram-token", tg_token, "--telegram-chat", tg_chat])
         if proxy_string:
             cmd.extend(["--proxy", proxy_string])
-        # Il delay non viene passato al CLI perché è gestito internamente da bot_cli.py
-        # (REQUEST_DELAY_SECONDS). Se vuoi passarlo, aggiungi: cmd.extend(["--delay-sec", str(delay_sec)])
 
         self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         self.running = True
@@ -113,7 +112,7 @@ class App(ctk.CTk):
         now = datetime.now()
         time_str = now.strftime("%H:%M:%S") + f".{now.microsecond // 1000:03d}"
         self.clock_label.configure(text=time_str)
-        self.after(10, self.update_clock)
+        self.after(10, self.update_clock)  # aggiorna ogni 10 ms
 
     def _log(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -140,7 +139,7 @@ class App(ctk.CTk):
         self.clock_label = ctk.CTkLabel(header_frame, text="", font=("Arial", 20, "bold"))
         self.clock_label.pack(side="right", padx=10)
 
-        # Contatori delle richieste
+        # Contatori
         self.counters_label = ctk.CTkLabel(settings_scroll, text="📊 Contatori: --/-- (sessione) --/-- (giorno)", font=("Arial", 12))
         self.counters_label.pack(pady=5)
         self.update_counters()
@@ -184,11 +183,11 @@ class App(ctk.CTk):
         footer_left = ctk.CTkLabel(settings_scroll, text="© 2019-2026 • IBRA TECH", font=("Arial", 9))
         footer_left.pack(pady=(15,5))
 
-        # RIGHT PANEL (ACCOUNT + LOG)
+        # RIGHT PANEL - ACCOUNT + LOG
         right_frame = ctk.CTkFrame(self)
         right_frame.grid(row=0, column=1, sticky="nsew", padx=(0,10), pady=10)
-        right_frame.grid_rowconfigure(0, weight=0)
-        right_frame.grid_rowconfigure(1, weight=1)
+        right_frame.grid_rowconfigure(0, weight=0)  # account list
+        right_frame.grid_rowconfigure(1, weight=1)  # log
         right_frame.grid_columnconfigure(0, weight=1)
 
         account_container = ctk.CTkFrame(right_frame)
@@ -230,12 +229,13 @@ class App(ctk.CTk):
                     data = json.load(f)
                 session_req = data.get('session_requests', 0)
                 daily_req = data.get('daily_requests', 0)
+                # I limiti sono definiti in constants.py (28 e 70)
                 session_limit = 28
                 daily_limit = 70
                 self.counters_label.configure(text=f"📊 Contatori: {session_req}/{session_limit} (sessione) | {daily_req}/{daily_limit} (giorno)")
             else:
                 self.counters_label.configure(text="📊 Contatori: file non trovato")
-        except Exception as e:
+        except Exception:
             self.counters_label.configure(text="📊 Contatori: errore")
         self.after(5000, self.update_counters)
 
@@ -381,7 +381,6 @@ class App(ctk.CTk):
 
         ctk.CTkButton(scroll_frame, text="💾 Salva", command=save).grid(row=row, column=0, columnspan=2, pady=20)
 
-    # ---------- SALVATAGGIO IMPOSTAZIONI ----------
     def save_global_settings(self):
         self.config["settings"]["check_interval_sec"] = int(self.interval.get())
         self.config["settings"]["request_delay_sec"] = int(self.delay.get())
@@ -423,7 +422,6 @@ class App(ctk.CTk):
                     self.proxy_user.insert(0, parts[2])
                     self.proxy_pass.insert(0, parts[3])
 
-    # ---------- AVVIO E FERMA ----------
     def start_selected(self):
         selected = [name for name, var in self.account_checkboxes.items() if var.get()]
         if not selected:
