@@ -2,7 +2,7 @@
 """
 Almaviva Bot - CLI Engine
 Monitoraggio appuntamenti per singolo account con gestione automatica limiti.
-Supporto proxy e parallelizzazione degli uffici. Salva contatori su file separato per account.
+Supporto proxy, parallelizzazione, e modalità sincronizzata a orari fissi.
 """
 import argparse
 import sys
@@ -17,7 +17,7 @@ import requests
 from constants import AUTH_TOKEN_URL, CLIENT_ID, CHECKS_URL, FREE_SLOTS_URL, VISA_TYPES, OFFICES
 
 def log(msg):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+    print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {msg}", flush=True)
 
 class RateLimiter:
     def __init__(self, email, session_limit=28, daily_limit=70):
@@ -28,7 +28,6 @@ class RateLimiter:
         self.daily_requests = 0
         self.session_reset = time.time() + 1800
         self.daily_reset = time.time() + 86400
-        # Crea un nome file sicuro dall'email
         safe_email = email.replace('@', '_').replace('.', '_')
         self.counters_file = f"request_counters_{safe_email}.json"
         self._load()
@@ -93,6 +92,29 @@ class RateLimiter:
         self._save()
         log(f"📊 Richieste: sessione {self.session_requests}/{self.session_limit}, giorno {self.daily_requests}/{self.daily_limit}")
 
+def sleep_until_exact_minute(interval_minutes, anticipate=1.5):
+    """Attende fino al prossimo minuto multiplo di interval_minutes, anticipando di 'anticipate' secondi."""
+    now = datetime.now()
+    minute = now.minute
+    second = now.second + now.microsecond / 1000000.0
+    target_minute = ((minute // interval_minutes) * interval_minutes + interval_minutes) % 60
+    if minute % interval_minutes == 0 and second < 0.1:
+        target_minute = minute + interval_minutes
+    if target_minute >= 60:
+        target_minute = 0
+        target = now.replace(minute=target_minute, second=0, microsecond=0) + timedelta(hours=1)
+    else:
+        target = now.replace(minute=target_minute, second=0, microsecond=0)
+    wait = (target - now).total_seconds()
+    wait -= anticipate
+    if wait < 0:
+        wait = 0
+    log(f"Attendo {wait:.2f} secondi fino a {target.strftime('%H:%M:%S')}")
+    time.sleep(wait)
+    # Spin per precisione
+    while datetime.now() < target:
+        pass
+
 # ==================== FUNZIONI API ====================
 def get_token(email, password, session):
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -142,13 +164,11 @@ def check_availability(token, office_id, visa_id, service_level, rate_limiter, s
         if r.status_code == 429:
             return "rate_limit", elapsed, r.status_code
         if r.status_code == 400:
-            # Leggi il corpo della risposta
             try:
                 error_data = r.json()
-                message = error_data.get("message", "Nessun dettaglio")
-                log(f"❌ ERRORE 400: {message}")
+                log(f"⚠️ ERRORE 400: {error_data.get('message', 'Nessun messaggio')}")
             except:
-                log(f"❌ ERRORE 400: {r.text}")
+                log(f"⚠️ ERRORE 400: risposta non decodificabile")
             return False, elapsed, r.status_code
         r.raise_for_status()
         rate_limiter.increment()
@@ -171,14 +191,12 @@ def get_free_slots(token, office_id, date, quantity, rate_limiter, session):
         if r.status_code == 429:
             return "rate_limit", elapsed, r.status_code
         if r.status_code == 400:
-            # Leggi il corpo della risposta
             try:
                 error_data = r.json()
-                message = error_data.get("message", "Nessun dettaglio")
-                log(f"❌ ERRORE 400: {message}")
+                log(f"⚠️ ERRORE 400 /free: {error_data.get('message', 'Nessun messaggio')}")
             except:
-                log(f"❌ ERRORE 400: {r.text}")
-            return False, elapsed, r.status_code
+                log(f"⚠️ ERRORE 400 /free: risposta non decodificabile")
+            return [], elapsed, r.status_code
         r.raise_for_status()
         rate_limiter.increment()
         return r.json(), elapsed, r.status_code
@@ -231,12 +249,6 @@ def process_office(office_id, token, trip_date, args, rate_limiter, session):
             return {"status": "nothing"}
     return {"status": "nothing"}
 
-def sleep_between_requests(delay_sec):
-    if delay_sec <= 0:
-        return
-    jitter = random.uniform(0.8, 1.2)
-    time.sleep(delay_sec * jitter)
-
 def main():
     parser = argparse.ArgumentParser(description='Almaviva Bot CLI Engine')
     parser.add_argument('--email', required=True, help='Email account')
@@ -254,6 +266,8 @@ def main():
     parser.add_argument('--destination', default='', help='Destinazione')
     parser.add_argument('--bot-name', default='Almaviva Bot', help='Nome del bot per le notifiche')
     parser.add_argument('--proxy', default='', help='Proxy in formato host:port:user:pass (opzionale)')
+    parser.add_argument('--sync-mode', action='store_true', help='Attesa sincronizzata al minuto (es. 0,5,10...)')
+    parser.add_argument('--sync-interval', type=int, default=5, help='Intervallo di sincronizzazione (minuti)')
     args = parser.parse_args()
 
     session = requests.Session()
@@ -275,7 +289,9 @@ def main():
 
     visa_name = "Sconosciuto"
     for name, vid in VISA_TYPES.items():
-        if vid == args.visa_id: visa_name = name; break
+        if vid == args.visa_id:
+            visa_name = name
+            break
 
     display_name = args.account_name if args.account_name else args.email
 
@@ -284,6 +300,8 @@ def main():
     log(f"Intervallo: {interval_sec} secondi")
     if delay_sec > 0:
         log(f"Delay tra richieste: {delay_sec} secondi")
+    if args.sync_mode:
+        log(f"Modalità sincronizzata: ogni {args.sync_interval} minuti (anticipo 1.5s)")
 
     rate_limiter = RateLimiter(args.email)
     token, refresh = get_token(args.email, args.password, session)
@@ -292,8 +310,18 @@ def main():
 
     current_ip = get_current_ip(session)
 
-    # Modalità sequenziale o parallela in base al delay
+    # All'inizio del loop principale, se sync_mode è attivo, attende il prossimo minuto esatto
+    first_loop = True
     while True:
+        if args.sync_mode:
+            if first_loop:
+                # Alla prima partenza attendi il prossimo ciclo
+                sleep_until_exact_minute(args.sync_interval, anticipate=1.5)
+                first_loop = False
+            else:
+                # Dopo un ciclo, attendi fino al prossimo minuto multiplo
+                sleep_until_exact_minute(args.sync_interval, anticipate=1.5)
+        # Esecuzione delle richieste (sequenziale o parallela)
         if delay_sec > 0:
             for office_id in office_ids:
                 result = process_office(office_id, token, trip_date, args, rate_limiter, session)
@@ -354,7 +382,7 @@ def main():
                     else:
                         log("⚠️ Telegram non configurato, notifica non inviata")
                     return 0
-                sleep_between_requests(delay_sec)
+                time.sleep(delay_sec)  # pausa tra uffici in modalità sequenziale
         else:
             # Modalità parallela
             with ThreadPoolExecutor(max_workers=len(office_ids)) as executor:
@@ -418,7 +446,9 @@ def main():
                         else:
                             log("⚠️ Telegram non configurato, notifica non inviata")
                         return 0
-        time.sleep(interval_sec)
+        if not args.sync_mode:
+            # Se non siamo in sync mode, attendiamo l'intervallo standard
+            time.sleep(interval_sec)
 
 if __name__ == "__main__":
     try:

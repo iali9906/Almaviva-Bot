@@ -15,6 +15,7 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 class BotProcess:
+    # ... (identico a prima) ...
     def __init__(self, account, settings, log_callback):
         self.account = account
         self.settings = settings
@@ -68,6 +69,10 @@ class BotProcess:
             cmd.extend(["--telegram-token", tg_token, "--telegram-chat", tg_chat])
         if proxy_string:
             cmd.extend(["--proxy", proxy_string])
+        # Nuove opzioni di sincronizzazione
+        if self.settings.get("sync_mode", False):
+            cmd.append("--sync-mode")
+            cmd.extend(["--sync-interval", str(self.settings.get("sync_interval", 5))])
 
         self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         self.running = True
@@ -101,8 +106,7 @@ class App(ctk.CTk):
         self.minsize(1000, 600)
         self.config = load_config()
         self.processes = {}
-        self.account_checkboxes = {}
-        self.table_labels = {}   # nome -> dict di label
+        self.accounts_data = {}
         self._create_widgets()
         self._load_settings_into_ui()
         self._start_clock()
@@ -122,10 +126,9 @@ class App(ctk.CTk):
         self.after(5000, self._start_counters_updater)
 
     def update_counters(self):
-        # Legge i contatori e aggiorna la tabella
         for acc in self.config.get("accounts", []):
-            name = acc.get("name")
-            email = acc.get("email")
+            name = acc.get("name", "")
+            email = acc.get("email", "")
             if not name:
                 continue
             safe_email = email.replace('@', '_').replace('.', '_')
@@ -140,57 +143,23 @@ class App(ctk.CTk):
                     daily_req = data.get('daily_requests', 0)
                 except:
                     pass
+            self.accounts_data[name] = {"session": session_req, "daily": daily_req, "email": email}
+        # Aggiorna la tabella
+        for row, (name, data) in enumerate(self.accounts_data.items(), start=1):
             if name in self.table_labels:
-                self.table_labels[name]["session"].configure(text=f"{session_req}/28")
-                self.table_labels[name]["daily"].configure(text=f"{daily_req}/70")
-            else:
-                # se l'account non è ancora nella tabella (aggiunto dopo la creazione), ricostruisci tabella
-                self.rebuild_accounts_table()
-                return
+                self.table_labels[name]["session"].configure(text=f"{data['session']}/28")
+                self.table_labels[name]["daily"].configure(text=f"{data['daily']}/70")
 
     def _log(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         self.log_text.insert("end", f"[{timestamp}] {msg}\n")
         self.log_text.see("end")
 
-    def rebuild_accounts_table(self):
-        # Ricostruisce completamente la tabella (usato dopo aggiunta/modifica/elimina account)
-        for widget in self.table_frame.winfo_children():
-            widget.destroy()
-        self.table_labels.clear()
-        # Intestazioni
-        headers = ["Seleziona", "Account", "Email", "Sessione", "Giorno"]
-        for col, txt in enumerate(headers):
-            lbl = ctk.CTkLabel(self.table_frame, text=txt, font=("Arial", 11, "bold"))
-            lbl.grid(row=0, column=col, padx=5, pady=2, sticky="ew")
-        # Righe
-        row = 1
-        self.account_checkboxes.clear()
-        for acc in self.config.get("accounts", []):
-            name = acc.get("name", "")
-            email = acc.get("email", "")
-            var = ctk.BooleanVar(value=False)
-            cb = ctk.CTkCheckBox(self.table_frame, text="", variable=var, width=20)
-            cb.grid(row=row, column=0, padx=5, pady=2)
-            self.account_checkboxes[name] = var
-            ctk.CTkLabel(self.table_frame, text=name).grid(row=row, column=1, padx=5, pady=2)
-            ctk.CTkLabel(self.table_frame, text=email).grid(row=row, column=2, padx=5, pady=2)
-            lbl_session = ctk.CTkLabel(self.table_frame, text="0/28")
-            lbl_session.grid(row=row, column=3, padx=5, pady=2)
-            lbl_daily = ctk.CTkLabel(self.table_frame, text="0/70")
-            lbl_daily.grid(row=row, column=4, padx=5, pady=2)
-            self.table_labels[name] = {"session": lbl_session, "daily": lbl_daily}
-            row += 1
-        for col in range(len(headers)):
-            self.table_frame.grid_columnconfigure(col, weight=1)
-
     def _create_widgets(self):
-        # Layout: left panel (impostazioni), right panel (account + log)
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # LEFT PANEL (impostazioni)
         left_frame = ctk.CTkFrame(self, width=380)
         left_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         left_frame.grid_propagate(False)
@@ -198,7 +167,51 @@ class App(ctk.CTk):
         settings_scroll = ctk.CTkScrollableFrame(left_frame, height=700)
         settings_scroll.pack(fill="both", expand=True)
 
-        ctk.CTkLabel(settings_scroll, text="🤖 IBRA TECH BOT", font=("Arial", 20, "bold")).pack(pady=(10,5))
+        # LOGO
+        logo_label = ctk.CTkLabel(settings_scroll, text="🤖 IBRA TECH BOT", font=("Arial", 20, "bold"))
+        logo_label.pack(pady=(10,5))
+
+        # TABELLA CONTATORI
+        ctk.CTkLabel(settings_scroll, text="STATO ACCOUNT", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10,0))
+        self.table_frame = ctk.CTkFrame(settings_scroll)
+        self.table_frame.pack(fill="x", padx=10, pady=5)
+        headers = ["Account", "Email", "Sessione", "Giorno"]
+        for col, txt in enumerate(headers):
+            lbl = ctk.CTkLabel(self.table_frame, text=txt, font=("Arial", 11, "bold"))
+            lbl.grid(row=0, column=col, padx=5, pady=2, sticky="ew")
+        self.table_labels = {}
+        for row, acc in enumerate(self.config.get("accounts", []), start=1):
+            name = acc.get("name", "")
+            email = acc.get("email", "")
+            self.table_labels[name] = {}
+            ctk.CTkLabel(self.table_frame, text=name).grid(row=row, column=0, padx=5, pady=2)
+            ctk.CTkLabel(self.table_frame, text=email).grid(row=row, column=1, padx=5, pady=2)
+            self.table_labels[name]["session"] = ctk.CTkLabel(self.table_frame, text="0/28")
+            self.table_labels[name]["session"].grid(row=row, column=2, padx=5, pady=2)
+            self.table_labels[name]["daily"] = ctk.CTkLabel(self.table_frame, text="0/70")
+            self.table_labels[name]["daily"].grid(row=row, column=3, padx=5, pady=2)
+        for col in range(4):
+            self.table_frame.grid_columnconfigure(col, weight=1)
+
+        # LISTA ACCOUNT CON CHECKBOX
+        ctk.CTkLabel(settings_scroll, text="SELEZIONE ACCOUNT", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10,0))
+        self.account_checkbox_frame = ctk.CTkScrollableFrame(settings_scroll, height=150)
+        self.account_checkbox_frame.pack(fill="x", padx=10, pady=5)
+        self.account_checkboxes = {}
+        self.refresh_checkbox_list()
+
+        # PULSANTI
+        btn_frame = ctk.CTkFrame(settings_scroll)
+        btn_frame.pack(fill="x", padx=10, pady=5)
+        ctk.CTkButton(btn_frame, text="➕ Nuovo", width=80, command=self.add_account).pack(side="left", padx=2)
+        ctk.CTkButton(btn_frame, text="✏️ Modifica", width=80, command=self.edit_account).pack(side="left", padx=2)
+        ctk.CTkButton(btn_frame, text="🗑️ Elimina", width=80, command=self.delete_account).pack(side="left", padx=2)
+
+        action_frame = ctk.CTkFrame(settings_scroll)
+        action_frame.pack(fill="x", padx=10, pady=5)
+        ctk.CTkButton(action_frame, text="▶ Avvia selezionati", fg_color="green", command=self.start_selected).pack(side="left", padx=2, expand=True, fill="x")
+        ctk.CTkButton(action_frame, text="⏹ Ferma selezionati", fg_color="red", command=self.stop_selected).pack(side="left", padx=2, expand=True, fill="x")
+        ctk.CTkButton(action_frame, text="⏸ Ferma tutti", fg_color="darkred", command=self.stop_all).pack(side="left", padx=2, expand=True, fill="x")
 
         # PROXY GLOBALE
         proxy_frame = ctk.CTkFrame(settings_scroll)
@@ -234,45 +247,44 @@ class App(ctk.CTk):
         self.tg_chat = ctk.CTkEntry(global_frame, width=300)
         self.tg_chat.pack(anchor="w", padx=10, pady=2)
 
+        # Sincronizzazione
+        self.sync_mode_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(global_frame, text="Abilita sincronizzazione oraria (es. 0,5,10...)", variable=self.sync_mode_var).pack(anchor="w", padx=10, pady=2)
+        ctk.CTkLabel(global_frame, text="Intervallo di sincronizzazione (minuti)").pack(anchor="w", padx=10)
+        self.sync_interval = ctk.CTkEntry(global_frame, width=120)
+        self.sync_interval.insert(0, "5")
+        self.sync_interval.pack(anchor="w", padx=10, pady=2)
+
         ctk.CTkButton(global_frame, text="💾 Salva impostazioni globali", command=self.save_global_settings).pack(pady=10)
 
         footer_left = ctk.CTkLabel(settings_scroll, text="© 2019-2026 • IBRA TECH", font=("Arial", 9))
         footer_left.pack(pady=(15,5))
 
-        # RIGHT PANEL (account + log)
+        # RIGHT PANEL - LOG
         right_frame = ctk.CTkFrame(self)
         right_frame.grid(row=0, column=1, sticky="nsew", padx=(0,10), pady=10)
-        right_frame.grid_rowconfigure(0, weight=0)   # account table
-        right_frame.grid_rowconfigure(1, weight=1)   # log
         right_frame.grid_columnconfigure(0, weight=1)
-
-        # Tabella account
-        account_frame = ctk.CTkFrame(right_frame)
-        account_frame.grid(row=0, column=0, sticky="nsew", pady=(0,10))
-        account_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(account_frame, text="ACCOUNT", font=("Arial", 16, "bold")).pack(anchor="w", padx=10, pady=(5,0))
-        self.table_frame = ctk.CTkFrame(account_frame)
-        self.table_frame.pack(fill="both", expand=True, padx=10, pady=5)
-        self.rebuild_accounts_table()
-
-        # Pulsanti azione sotto la tabella
-        action_frame = ctk.CTkFrame(account_frame)
-        action_frame.pack(fill="x", padx=10, pady=5)
-        ctk.CTkButton(action_frame, text="➕ Nuovo", width=80, command=self.add_account).pack(side="left", padx=2)
-        ctk.CTkButton(action_frame, text="✏️ Modifica", width=80, command=self.edit_account).pack(side="left", padx=2)
-        ctk.CTkButton(action_frame, text="🗑️ Elimina", width=80, command=self.delete_account).pack(side="left", padx=2)
-        ctk.CTkButton(action_frame, text="▶ Avvia selezionati", fg_color="green", command=self.start_selected).pack(side="left", padx=2, expand=True, fill="x")
-        ctk.CTkButton(action_frame, text="⏹ Ferma selezionati", fg_color="red", command=self.stop_selected).pack(side="left", padx=2, expand=True, fill="x")
-        ctk.CTkButton(action_frame, text="⏸ Ferma tutti", fg_color="darkred", command=self.stop_all).pack(side="left", padx=2, expand=True, fill="x")
-
-        # Log area
+        right_frame.grid_rowconfigure(0, weight=1)
         log_frame = ctk.CTkFrame(right_frame)
-        log_frame.grid(row=1, column=0, sticky="nsew")
+        log_frame.grid(row=0, column=0, sticky="nsew")
         log_frame.grid_rowconfigure(0, weight=1)
         log_frame.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(log_frame, text="LOG", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(5,0))
-        self.log_text = ctk.CTkTextbox(log_frame, height=300)
+        self.log_text = ctk.CTkTextbox(log_frame)
         self.log_text.pack(fill="both", expand=True, padx=10, pady=5)
+
+        self.update_counters()
+
+    def refresh_checkbox_list(self):
+        for widget in self.account_checkbox_frame.winfo_children():
+            widget.destroy()
+        self.account_checkboxes.clear()
+        for acc in self.config.get("accounts", []):
+            name = acc.get("name", "Senza nome")
+            var = ctk.BooleanVar(value=False)
+            cb = ctk.CTkCheckBox(self.account_checkbox_frame, text=name, variable=var)
+            cb.pack(anchor="w", padx=10, pady=2)
+            self.account_checkboxes[name] = var
 
     def add_account(self):
         self.open_account_editor()
@@ -296,7 +308,28 @@ class App(ctk.CTk):
         for name in selected:
             self.config["accounts"] = [a for a in self.config["accounts"] if a.get("name") != name]
         save_config(self.config)
-        self.rebuild_accounts_table()
+        self.refresh_checkbox_list()
+        # Ricostruisci tabella contatori
+        self.table_labels.clear()
+        for widget in self.table_frame.winfo_children():
+            widget.destroy()
+        headers = ["Account", "Email", "Sessione", "Giorno"]
+        for col, txt in enumerate(headers):
+            lbl = ctk.CTkLabel(self.table_frame, text=txt, font=("Arial", 11, "bold"))
+            lbl.grid(row=0, column=col, padx=5, pady=2, sticky="ew")
+        for row, acc in enumerate(self.config.get("accounts", []), start=1):
+            name = acc.get("name", "")
+            email = acc.get("email", "")
+            self.table_labels[name] = {}
+            ctk.CTkLabel(self.table_frame, text=name).grid(row=row, column=0, padx=5, pady=2)
+            ctk.CTkLabel(self.table_frame, text=email).grid(row=row, column=1, padx=5, pady=2)
+            self.table_labels[name]["session"] = ctk.CTkLabel(self.table_frame, text="0/28")
+            self.table_labels[name]["session"].grid(row=row, column=2, padx=5, pady=2)
+            self.table_labels[name]["daily"] = ctk.CTkLabel(self.table_frame, text="0/70")
+            self.table_labels[name]["daily"].grid(row=row, column=3, padx=5, pady=2)
+        for col in range(4):
+            self.table_frame.grid_columnconfigure(col, weight=1)
+        self.update_counters()
         self._log(f"Eliminati account: {', '.join(selected)}")
 
     def open_account_editor(self, account=None):
@@ -399,7 +432,28 @@ class App(ctk.CTk):
             else:
                 self.config["accounts"].append(new_acc)
             save_config(self.config)
-            self.rebuild_accounts_table()
+            self.refresh_checkbox_list()
+            # Aggiorna tabella contatori
+            self.table_labels.clear()
+            for widget in self.table_frame.winfo_children():
+                widget.destroy()
+            headers = ["Account", "Email", "Sessione", "Giorno"]
+            for col, txt in enumerate(headers):
+                lbl = ctk.CTkLabel(self.table_frame, text=txt, font=("Arial", 11, "bold"))
+                lbl.grid(row=0, column=col, padx=5, pady=2, sticky="ew")
+            for row2, acc2 in enumerate(self.config.get("accounts", []), start=1):
+                name2 = acc2.get("name", "")
+                email2 = acc2.get("email", "")
+                self.table_labels[name2] = {}
+                ctk.CTkLabel(self.table_frame, text=name2).grid(row=row2, column=0, padx=5, pady=2)
+                ctk.CTkLabel(self.table_frame, text=email2).grid(row=row2, column=1, padx=5, pady=2)
+                self.table_labels[name2]["session"] = ctk.CTkLabel(self.table_frame, text="0/28")
+                self.table_labels[name2]["session"].grid(row=row2, column=2, padx=5, pady=2)
+                self.table_labels[name2]["daily"] = ctk.CTkLabel(self.table_frame, text="0/70")
+                self.table_labels[name2]["daily"].grid(row=row2, column=3, padx=5, pady=2)
+            for col in range(4):
+                self.table_frame.grid_columnconfigure(col, weight=1)
+            self.update_counters()
             editor.destroy()
 
         ctk.CTkButton(scroll_frame, text="💾 Salva", command=save).grid(row=row, column=0, columnspan=2, pady=20)
@@ -409,6 +463,8 @@ class App(ctk.CTk):
         self.config["settings"]["request_delay_sec"] = int(self.delay.get())
         self.config["settings"]["telegram_bot_token"] = self.tg_token.get()
         self.config["settings"]["telegram_chat_id"] = self.tg_chat.get()
+        self.config["settings"]["sync_mode"] = self.sync_mode_var.get()
+        self.config["settings"]["sync_interval"] = int(self.sync_interval.get())
         save_config(self.config)
         msgbox.showinfo("Info", "Impostazioni globali salvate")
 
@@ -434,6 +490,8 @@ class App(ctk.CTk):
         self.delay.insert(0, str(settings.get("request_delay_sec", REQUEST_DELAY_SECONDS)))
         self.tg_token.insert(0, settings.get("telegram_bot_token", ""))
         self.tg_chat.insert(0, settings.get("telegram_chat_id", ""))
+        self.sync_mode_var.set(settings.get("sync_mode", False))
+        self.sync_interval.insert(0, str(settings.get("sync_interval", 5)))
         proxy_list = settings.get("proxy_list", [])
         if proxy_list:
             first_proxy = proxy_list[0]
@@ -462,6 +520,8 @@ class App(ctk.CTk):
             settings["request_delay_sec"] = int(self.delay.get())
             settings["telegram_bot_token"] = self.tg_token.get()
             settings["telegram_chat_id"] = self.tg_chat.get()
+            settings["sync_mode"] = self.sync_mode_var.get()
+            settings["sync_interval"] = int(self.sync_interval.get())
             proc = BotProcess(acc, settings, self._log)
             proc.start()
             self.processes[name] = proc
