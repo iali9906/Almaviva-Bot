@@ -141,6 +141,15 @@ def check_availability(token, office_id, visa_id, service_level, rate_limiter, s
             return "expired", elapsed, r.status_code
         if r.status_code == 429:
             return "rate_limit", elapsed, r.status_code
+        if r.status_code == 400:
+            # Leggi il corpo della risposta
+            try:
+                error_data = r.json()
+                message = error_data.get("message", "Nessun dettaglio")
+                log(f"❌ ERRORE 400: {message}")
+            except:
+                log(f"❌ ERRORE 400: {r.text}")
+            return False, elapsed, r.status_code
         r.raise_for_status()
         rate_limiter.increment()
         return r.json(), elapsed, r.status_code
@@ -161,6 +170,15 @@ def get_free_slots(token, office_id, date, quantity, rate_limiter, session):
             return "expired", elapsed, r.status_code
         if r.status_code == 429:
             return "rate_limit", elapsed, r.status_code
+        if r.status_code == 400:
+            # Leggi il corpo della risposta
+            try:
+                error_data = r.json()
+                message = error_data.get("message", "Nessun dettaglio")
+                log(f"❌ ERRORE 400: {message}")
+            except:
+                log(f"❌ ERRORE 400: {r.text}")
+            return False, elapsed, r.status_code
         r.raise_for_status()
         rate_limiter.increment()
         return r.json(), elapsed, r.status_code
